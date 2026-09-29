@@ -101953,6 +101953,97 @@ function readInputWorkbook(inputContext) {
     workbookDataRowCount: Math.max(0, rows.length - firstDataIndex)
   };
 }
+var CORRECTION_HIGHLIGHT_MAX_MATRIX_CELLS = 15e5;
+var ORIGINAL_CHANGE_FONT = { bold: true, underline: "single", color: { argb: "FFC00000" } };
+var CORRECTED_CHANGE_FONT = { bold: true, color: { argb: "FF008000" } };
+function correctionHighlightTokens(value) {
+  return String(value ?? "").match(/\s+|[\p{L}\p{M}\p{N}_]+|[^\s\p{L}\p{M}\p{N}_]+/gu) || [];
+}
+function correctionHighlightTokenWeight(token) {
+  if (/^\s+$/u.test(token)) return 1;
+  if (/^[\p{L}\p{M}\p{N}_]+$/u.test(token)) return 5;
+  return 2;
+}
+function appendCorrectionHighlightRun(runs, text, changed) {
+  if (!text) return;
+  const last = runs[runs.length - 1];
+  if (last && last.changed === changed) {
+    last.text += text;
+  } else {
+    runs.push({ text, changed });
+  }
+}
+function coarseCorrectionHighlightRuns(beforeTokens, afterTokens) {
+  let prefixLength = 0;
+  while (prefixLength < beforeTokens.length && prefixLength < afterTokens.length && beforeTokens[prefixLength] === afterTokens[prefixLength]) {
+    prefixLength += 1;
+  }
+  let suffixLength = 0;
+  while (suffixLength < beforeTokens.length - prefixLength && suffixLength < afterTokens.length - prefixLength && beforeTokens[beforeTokens.length - suffixLength - 1] === afterTokens[afterTokens.length - suffixLength - 1]) {
+    suffixLength += 1;
+  }
+  const beforeRuns = [];
+  const afterRuns = [];
+  appendCorrectionHighlightRun(beforeRuns, beforeTokens.slice(0, prefixLength).join(""), false);
+  appendCorrectionHighlightRun(afterRuns, afterTokens.slice(0, prefixLength).join(""), false);
+  appendCorrectionHighlightRun(beforeRuns, beforeTokens.slice(prefixLength, beforeTokens.length - suffixLength).join(""), true);
+  appendCorrectionHighlightRun(afterRuns, afterTokens.slice(prefixLength, afterTokens.length - suffixLength).join(""), true);
+  if (suffixLength > 0) {
+    appendCorrectionHighlightRun(beforeRuns, beforeTokens.slice(beforeTokens.length - suffixLength).join(""), false);
+    appendCorrectionHighlightRun(afterRuns, afterTokens.slice(afterTokens.length - suffixLength).join(""), false);
+  }
+  return { beforeRuns, afterRuns };
+}
+function correctionHighlightRuns(beforeText, afterText) {
+  const beforeTokens = correctionHighlightTokens(beforeText);
+  const afterTokens = correctionHighlightTokens(afterText);
+  if (beforeTokens.length * afterTokens.length > CORRECTION_HIGHLIGHT_MAX_MATRIX_CELLS) {
+    return coarseCorrectionHighlightRuns(beforeTokens, afterTokens);
+  }
+  const scores = Array.from(
+    { length: beforeTokens.length + 1 },
+    () => new Uint32Array(afterTokens.length + 1)
+  );
+  for (let beforeIndex = beforeTokens.length - 1; beforeIndex >= 0; beforeIndex -= 1) {
+    for (let afterIndex = afterTokens.length - 1; afterIndex >= 0; afterIndex -= 1) {
+      scores[beforeIndex][afterIndex] = beforeTokens[beforeIndex] === afterTokens[afterIndex] ? correctionHighlightTokenWeight(beforeTokens[beforeIndex]) + scores[beforeIndex + 1][afterIndex + 1] : Math.max(scores[beforeIndex + 1][afterIndex], scores[beforeIndex][afterIndex + 1]);
+    }
+  }
+  const beforeRuns = [];
+  const afterRuns = [];
+  let beforeIndex = 0;
+  let afterIndex = 0;
+  while (beforeIndex < beforeTokens.length || afterIndex < afterTokens.length) {
+    if (beforeIndex < beforeTokens.length && afterIndex < afterTokens.length && beforeTokens[beforeIndex] === afterTokens[afterIndex]) {
+      appendCorrectionHighlightRun(beforeRuns, beforeTokens[beforeIndex], false);
+      appendCorrectionHighlightRun(afterRuns, afterTokens[afterIndex], false);
+      beforeIndex += 1;
+      afterIndex += 1;
+    } else if (afterIndex < afterTokens.length && (beforeIndex >= beforeTokens.length || scores[beforeIndex][afterIndex + 1] >= scores[beforeIndex + 1][afterIndex])) {
+      appendCorrectionHighlightRun(afterRuns, afterTokens[afterIndex], true);
+      afterIndex += 1;
+    } else {
+      appendCorrectionHighlightRun(beforeRuns, beforeTokens[beforeIndex], true);
+      beforeIndex += 1;
+    }
+  }
+  return { beforeRuns, afterRuns };
+}
+function richTextValue(runs, changedFont) {
+  return {
+    richText: runs.map((run) => run.changed ? { font: changedFont, text: run.text } : { text: run.text })
+  };
+}
+function correctionHighlightValues(beforeText, afterText) {
+  const before = sanitizeCorrectedText(beforeText);
+  const after = sanitizeCorrectedText(afterText);
+  if (before === after) return null;
+  const { beforeRuns, afterRuns } = correctionHighlightRuns(before, after);
+  return {
+    before: richTextValue(beforeRuns, ORIGINAL_CHANGE_FONT),
+    after: richTextValue(afterRuns, CORRECTED_CHANGE_FONT)
+  };
+}
 async function writeMatrixNoHeaders(filePath, sheetName, matrix, options = {}) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const safeMatrix = matrix.map((row) => row.map(
@@ -101969,6 +102060,8 @@ async function writeMatrixNoHeaders(filePath, sheetName, matrix, options = {}) {
   const widths = options.columnWidths || safeMatrix[0]?.map(() => 60) || [];
   const centerThroughColumn = Number(options.centerThroughColumn || 0);
   const wrappedTextStartColumn = Number(options.wrappedTextStartColumn || 1);
+  const highlightTextColumns = Array.isArray(options.highlightTextColumns) ? options.highlightTextColumns.map(Number) : [];
+  const changedRowFillColumns = Array.isArray(options.changedRowFillColumns) ? options.changedRowFillColumns.map(Number) : [];
   worksheet.columns = widths.map((width) => ({ width }));
   worksheet.properties.defaultRowHeight = 18;
   if (options.headerRow && safeMatrix.length > 0) {
@@ -101993,8 +102086,17 @@ async function writeMatrixNoHeaders(filePath, sheetName, matrix, options = {}) {
         wrapText: columnNumber >= wrappedTextStartColumn
       };
     });
-    if (options.highlightChanges && safeMatrix[rowNumber - 1]?.[2] !== safeMatrix[rowNumber - 1]?.[3]) {
-      for (const columnNumber of [4, 5]) {
+    const sourceRow = safeMatrix[rowNumber - 1] || [];
+    if (options.highlightChanges && highlightTextColumns.length === 2) {
+      const [beforeColumn, afterColumn] = highlightTextColumns;
+      const beforeText = sourceRow[beforeColumn - 1];
+      const afterText = sourceRow[afterColumn - 1];
+      const highlighted = correctionHighlightValues(beforeText, afterText);
+      if (highlighted) {
+        worksheet.getCell(rowNumber, beforeColumn).value = highlighted.before;
+        worksheet.getCell(rowNumber, afterColumn).value = highlighted.after;
+      }
+      for (const columnNumber of highlighted ? changedRowFillColumns : []) {
         worksheet.getCell(rowNumber, columnNumber).fill = {
           type: "pattern",
           pattern: "solid",
@@ -102048,6 +102150,8 @@ async function writeResults(inputContext, inputData, results) {
     ], {
       headerRow: true,
       highlightChanges: true,
+      highlightTextColumns: [3, 4],
+      changedRowFillColumns: [4, 5],
       centerThroughColumn: 2,
       wrappedTextStartColumn: 3,
       columnWidths: [14, 24, 72, 72, 46]
@@ -102058,7 +102162,11 @@ async function writeResults(inputContext, inputData, results) {
     OUTPUT_XLSX,
     resultWorksheetName(inputData.sheetName, "_colA"),
     details.map((result) => [result.originalText, result.correctedText, result.note]),
-    { columnWidths: [72, 72, 46] }
+    {
+      highlightChanges: true,
+      highlightTextColumns: [1, 2],
+      columnWidths: [72, 72, 46]
+    }
   );
 }
 async function runSelfTest() {
@@ -102135,13 +102243,31 @@ async function runSelfTest() {
       ["teh", "the", "Corrected spelling."]
     ], {
       headerRow: true,
-      highlightChanges: false,
+      highlightChanges: true,
+      highlightTextColumns: [1, 2],
       columnWidths: [40, 40, 30]
     });
     const workbook = import_xlsx.default.readFile(workbookPath);
     const sheet = workbook.Sheets.self_test;
     if (!sheet || sheet.A1?.v !== "Original content" || sheet.B2?.v !== "the") {
       throw new Error("Bundled Excel read/write self-test failed.");
+    }
+    const styledWorkbook = new import_exceljs.default.Workbook();
+    await styledWorkbook.xlsx.readFile(workbookPath);
+    const styledSheet = styledWorkbook.getWorksheet("self_test");
+    const originalRuns = styledSheet?.getCell("A2").value?.richText;
+    const correctedRuns = styledSheet?.getCell("B2").value?.richText;
+    if (!Array.isArray(originalRuns) || !Array.isArray(correctedRuns) || originalRuns.map((run) => run.text).join("") !== "teh" || correctedRuns.map((run) => run.text).join("") !== "the" || originalRuns[0]?.font?.color?.argb !== ORIGINAL_CHANGE_FONT.color.argb || correctedRuns[0]?.font?.color?.argb !== CORRECTED_CHANGE_FONT.color.argb) {
+      throw new Error("Correction rich-text highlighting self-test failed.");
+    }
+    const multiChangeHighlights = correctionHighlightValues(
+      "The teh cat chased the qick dog.",
+      "The the cat chased the quick dog."
+    );
+    const originalChangedText = multiChangeHighlights.before.richText.filter((run) => run.font?.bold).map((run) => run.text).join("");
+    const correctedChangedText = multiChangeHighlights.after.richText.filter((run) => run.font?.bold).map((run) => run.text).join("");
+    if (originalChangedText !== "tehqick" || correctedChangedText !== "thequick") {
+      throw new Error("Multiple correction highlighting self-test failed.");
     }
     let pathCollisionRejected = false;
     try {
@@ -102229,6 +102355,7 @@ async function runSelfTest() {
       distributionProvenance: true,
       freshDualModelResolver: true,
       excelReadWrite: true,
+      correctionRichTextHighlights: true,
       artifactPathSeparation: true,
       apiCredentialsStripped: true,
       offDomainModelRedirectRejected: true,
@@ -102698,7 +102825,7 @@ async function main() {
     const results = records.map((record) => ({ correctedText: record.text, note: NO_ERRORS_NOTE }));
     const now = (/* @__PURE__ */ new Date()).toISOString();
     job = {
-      schemaVersion: 6,
+      schemaVersion: 7,
       jobType: inputContext.kind === "indesign_content_export" ? "indesign_content_export_typo_check" : "workbook_typo_check",
       status: "running",
       provider: "CodexSubscription",
@@ -102736,7 +102863,15 @@ async function main() {
         exportStartedAt: inputContext.exportRun?.startedAt || null,
         exportCompletedAt: inputContext.exportRun?.completedAt || null
       },
-      output: { path: OUTPUT_PATH, format: OUTPUT_JSON ? "json" : "xlsx" },
+      output: {
+        path: OUTPUT_PATH,
+        format: OUTPUT_JSON ? "json" : "xlsx",
+        correctionHighlighting: OUTPUT_JSON ? null : {
+          granularity: "token",
+          original: "bold_red_underlined",
+          corrected: "bold_green"
+        }
+      },
       batching: {
         maxRows: BATCH_MAX_ROWS,
         maxChars: BATCH_MAX_CHARS,

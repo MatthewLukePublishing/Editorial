@@ -109,6 +109,13 @@ The output has three headerless columns:
 2. corrected text; and
 3. the independent recheck note.
 
+As the final workbook-formatting step, every changed word or punctuation segment
+is highlighted inside its paragraph: the original form is bold, red, and
+underlined, while the corrected form is bold and green. Unchanged surrounding
+text remains normally formatted, so each correction can be located without
+comparing two entire paragraphs manually. The same highlighting is applied to
+the `Original content` and `Corrected content` columns in InDesign reports.
+
 A JSON job record is written beside the output workbook. It contains hashes,
 query evidence, the model policy, and the exact model used. Input, output, and job
 record paths must be different.
