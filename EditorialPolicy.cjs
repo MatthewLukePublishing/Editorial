@@ -27,18 +27,46 @@ function entries(value) {
     return { name: entry.slice(0, newline).trim(), body: entry.slice(newline + 1) };
   });
 }
+function objectRecord(value, label) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid editorial " + label + ".");
+  return value;
+}
+function orderedRecord(value, keys) {
+  return Object.fromEntries([
+    ...keys.filter(key => Object.hasOwn(value, key)).map(key => [key, value[key]]),
+    ...Object.entries(value).filter(([key]) => !keys.includes(key)),
+  ]);
+}
 function parseEditorialMarkdown(value) {
   const markdown = String(value).replace(/\r\n/g, "\n").replace(/^\uFEFF/, "");
-  const policy = jsonBlock(section(markdown, "Policy metadata", "Shared rules")).metadata;
+  const metadata = objectRecord(jsonBlock(section(markdown, "Policy metadata", "Shared rules")).metadata, "metadata");
+  const { markdownFormatVersion = 1, sharedRuleDefaults = {}, languageDefaults = {}, ...policy } = metadata;
+  if (![1, 2].includes(markdownFormatVersion) ||
+      (markdownFormatVersion === 1 && ("sharedRuleDefaults" in metadata || "languageDefaults" in metadata))) {
+    throw new Error("Unsupported editorial Markdown format.");
+  }
+  objectRecord(sharedRuleDefaults, "shared rule defaults");
+  objectRecord(languageDefaults, "language defaults");
+  if ("id" in sharedRuleDefaults || "instruction" in sharedRuleDefaults ||
+      ["language", "code", "rules"].some(key => key in languageDefaults)) {
+    throw new Error("Editorial defaults cannot define rule instructions or language identity.");
+  }
+  if ("crossReferences" in languageDefaults) objectRecord(languageDefaults.crossReferences, "default cross references");
   policy.shared = entries(section(markdown, "Shared rules", "Languages")).map(entry => {
     const parsed = jsonBlock(entry.body, true);
+    objectRecord(parsed.metadata, "rule metadata");
     if ("id" in parsed.metadata || "instruction" in parsed.metadata) throw new Error("Rule ID and instruction must be authored in Markdown.");
-    return { ...parsed.metadata, id: entry.name, instruction: parsed.instruction };
+    return orderedRecord({ ...structuredClone(sharedRuleDefaults), ...parsed.metadata, id: entry.name, instruction: parsed.instruction },
+      ["category", "stages", "verification", "scope", "source", "id", "instruction"]);
   });
   policy.languages = entries(section(markdown, "Languages", "Workbook transcription")).map(entry => {
-    const locale = jsonBlock(entry.body).metadata;
-    if (locale.language !== entry.name) throw new Error("Language heading and policy disagree.");
-    return locale;
+    const authored = objectRecord(jsonBlock(entry.body).metadata, "language metadata");
+    if (authored.language !== entry.name) throw new Error("Language heading and policy disagree.");
+    if ("crossReferences" in authored) objectRecord(authored.crossReferences, "cross references");
+    const locale = { ...languageDefaults, ...authored };
+    locale.crossReferences = orderedRecord({ ...languageDefaults.crossReferences, ...authored.crossReferences }, ["image", "text", "credit"]);
+    return orderedRecord(locale, ["language", "code", "dateExample", "decimal", "grouping", "percentExample", "quotes",
+      "capitalization", "acronyms", "hyphens", "units", "dateRule", "punctuation", "rules", "crossReferences"]);
   });
   if (policy.schemaVersion !== 1 || !policy.version || !Array.isArray(policy.precedence) || !Array.isArray(policy.sources)) {
     throw new Error("Invalid translation editorial policy schema.");
@@ -66,6 +94,35 @@ function parseEditorialMarkdown(value) {
   }
   if (new Set(allRules.map(rule => rule.id)).size !== allRules.length) throw new Error("Duplicate editorial rule IDs.");
   return policy;
+}
+function parseWorkbookTranscription(value) {
+  const markdown = String(value).replace(/\r\n/g, "\n").replace(/^\uFEFF/, "");
+  const marker = "\n## Workbook transcription\n";
+  if (markdown.split(marker).length !== 2) throw new Error("Missing or duplicate workbook transcription.");
+  const body = markdown.split(marker)[1];
+  const compact = body.match(/\n```json\n([\s\S]*?)\n```\s*$/);
+  const cells = new Map();
+  const add = (address, text) => {
+    if (!/^[A-H][1-9]\d*$/.test(address) || typeof text !== "string" || cells.has(address)) {
+      throw new Error("Invalid or duplicate workbook transcription cell.");
+    }
+    cells.set(address, text);
+  };
+  if (compact) {
+    // Count authored keys as well as parsed keys so duplicate groups cannot
+    // silently overwrite source evidence during JSON parsing.
+    const pairs = objectRecord(JSON.parse(compact[1]), "workbook transcription");
+    const keyMatches = [...compact[1].matchAll(/(?:^|[{,\n])\s*"((?:[^"\\]|\\.)*)"\s*:/g)];
+    if (keyMatches.length !== Object.keys(pairs).length) throw new Error("Duplicate workbook transcription groups.");
+    for (const [addresses, text] of Object.entries(pairs)) {
+      if (addresses.trim() !== addresses || /\s{2,}|[^\S ]/.test(addresses)) throw new Error("Invalid workbook cell group.");
+      for (const address of addresses.split(" ")) add(address, text);
+    }
+  } else {
+    for (const match of body.matchAll(/### Sheet1!([A-H]\d+)\n\n```text\n([\s\S]*?)\n```/g)) add(match[1], match[2]);
+  }
+  if (!cells.size) throw new Error("Empty workbook transcription.");
+  return [...cells].sort(([left], [right]) => Number(left.slice(1)) - Number(right.slice(1)) || left.charCodeAt(0) - right.charCodeAt(0));
 }
 function loadEditorialRules(filePath, expectedSha256) {
   const bytes = fs.readFileSync(filePath);
@@ -113,4 +170,4 @@ function editorialPrompt(filePath, language, stage, expectedSha256) {
     "Infer only what the supplied text proves. Do not invent missing acronym expansions, conversions, section boundaries, formatting or facts. Text-only review cannot verify layer order, object stacking, TOC numbering, paragraph indents, bold or italic character styles.",
   ].join("\n");
 }
-module.exports = { LANGUAGES, STAGES, parseEditorialMarkdown, loadEditorialRules, resolveEditorialRules, editorialPrompt };
+module.exports = { LANGUAGES, STAGES, parseEditorialMarkdown, parseWorkbookTranscription, loadEditorialRules, resolveEditorialRules, editorialPrompt };
