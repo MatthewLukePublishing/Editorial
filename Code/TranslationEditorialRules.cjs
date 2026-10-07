@@ -1,73 +1,12 @@
 "use strict";
 
-const fs = require("node:fs");
 const path = require("node:path");
-const crypto = require("node:crypto");
-const POLICY_PATH = path.join(__dirname, "TranslationEditorialRules.json");
-const LANGUAGES = ["English", "French", "German", "Spanish", "Portuguese", "Dutch", "Italian", "Turkish", "Polish", "Swedish"];
-const STAGES = ["glossary", "text", "diagram", "caption", "icml", "layout"];
-
-function loadEditorialRules() {
-  const bytes = fs.readFileSync(POLICY_PATH);
-  const policy = JSON.parse(bytes.toString("utf8"));
-  if (policy.schemaVersion !== 1 || !Array.isArray(policy.shared) || !Array.isArray(policy.languages)) {
-    throw new Error("Invalid translation editorial policy schema.");
-  }
-  const names = policy.languages.map(entry => entry.language);
-  if (names.length !== LANGUAGES.length || new Set(names).size !== LANGUAGES.length || LANGUAGES.some(name => !names.includes(name))) {
-    throw new Error("Translation editorial policy must cover exactly the ten supported languages.");
-  }
-  for (const locale of policy.languages) {
-    if (locale.rules !== undefined && !Array.isArray(locale.rules)) throw new Error("Invalid language-specific editorial rules.");
-  }
-  const allRules = [...policy.shared, ...policy.languages.flatMap(locale => locale.rules || [])];
-  for (const rule of allRules) {
-    if (!rule.id || !rule.instruction || !rule.stages?.length || rule.stages.some(stage => !STAGES.includes(stage))) {
-      throw new Error("Invalid editorial rule or pipeline stage.");
-    }
-  }
-  if (new Set(allRules.map(rule => rule.id)).size !== allRules.length) throw new Error("Duplicate editorial rule IDs.");
-  return { policy, sha256: crypto.createHash("sha256").update(bytes).digest("hex").toUpperCase() };
-}
-
-function resolveEditorialRules(language, stage) {
-  if (!STAGES.includes(stage)) throw new Error(`Unknown editorial pipeline stage: ${stage}`);
-  const { policy, sha256 } = loadEditorialRules();
-  const requested = String(language || "").trim().toLowerCase();
-  const name = requested === "brazilian portuguese" ? "portuguese" : requested;
-  const selected = policy.languages.find(entry => entry.language.toLowerCase() === name);
-  if (!selected) throw new Error(`No editorial policy for language: ${language}`);
-  const effective = { ...selected };
-  if (requested === "brazilian portuguese") effective.quotes = "“texto”";
-  return {
-    version: policy.version, sha256, stage, language: effective,
-    precedence: policy.precedence,
-    rules: [...policy.shared, ...(effective.rules || [])].filter(rule => rule.stages.includes(stage)),
-  };
-}
-
-function editorialPrompt(language, stage, expectedSha256) {
-  const selected = resolveEditorialRules(language, stage);
-  if(expectedSha256 && selected.sha256!==expectedSha256) throw new Error("Editorial rules changed during the job; start a new rules review.");
-  const locale = selected.language;
-  const localRules = stage === "layout" ? [] : [
-    locale.capitalization, locale.acronyms, locale.hyphens,
-    ...(stage === "glossary" ? [] : [
-      locale.dateRule, locale.punctuation,
-      `Use ${locale.quotes} quotation typography and native-language placement of quotation punctuation.`,
-      `Use decimal separator ${JSON.stringify(locale.decimal)} and grouping separator ${JSON.stringify(locale.grouping)} in ordinary quantities, never in years, page numbers, identifiers or official designations. Percentage example: ${locale.percentExample}.`,
-      `Measurement policy: ${locale.units === "metric_only" ? "metric only outside the stated exceptions" : "metric first, then imperial"}.`,
-    ]),
-  ];
-  return [
-    `Publishing editorial rules ${selected.version}; ${locale.language}; stage ${stage}; SHA-256 ${selected.sha256}.`,
-    ...selected.precedence,
-    ...selected.rules.map(rule => `[${rule.id}] ${rule.instruction}`),
-    ...localRules,
-    ...(["text", "diagram", "caption"].includes(stage) ? ["Produce the final language-specific Unicode spacing during translation, before export/import. Do not defer text corrections to InDesign GREP. NNBSP is a label, not text or GREP syntax; use the actual U+202F character where required, and U+00A0 for NBSP."] : []),
-    "Apply only relevant rules. Do not modify protected source quotations, official designations, glossary locks, literal markup or identifiers to satisfy a generic style rule.",
-  ].join("\n");
-}
+const policyReader = require("./EditorialPolicy.cjs");
+const POLICY_PATH = path.join(__dirname, "Translation Rules.md");
+const { LANGUAGES, STAGES } = policyReader;
+function loadEditorialRules() { return policyReader.loadEditorialRules(POLICY_PATH); }
+function resolveEditorialRules(language, stage) { return policyReader.resolveEditorialRules(POLICY_PATH, language, stage); }
+function editorialPrompt(language, stage, expectedSha256) { return policyReader.editorialPrompt(POLICY_PATH, language, stage, expectedSha256); }
 
 // Protect literal syntax before any text-only typography operation. Caller-provided
 // strings protect book-specific names and exact glossary entries as well.

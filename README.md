@@ -107,10 +107,18 @@ Read the stage README files before preparing data or launching an Adobe applicat
 
 ## Editorial rules across the pipeline
 
-`Code/TranslationEditorialRules.json` is the versioned runtime policy for English,
+[Translation Rules.md](<Code/Translation Rules.md>) is the editable, versioned runtime policy for English,
 French, German, Spanish, Portuguese, Dutch, Italian, Turkish, Polish and Swedish.
 It distinguishes the supplied house style from native-language adaptations and
-records its source references. The original private workbook is not distributed.
+records its source references. It contains a complete, cell-addressed transcription
+of the supplied workbook, active Markdown rule instructions, and language metadata.
+Edit shared-rule prose or add a unique rule with the documented stage metadata;
+saved changes are read by prompts and invalidate stale job evidence. Language
+settings also feed the existing typography and layout checks. The original workbook
+is unchanged and is not needed at runtime. Typo Checker reads this same canonical
+file when the projects are installed side by side and includes an identical copy
+for standalone distribution. Keep both distributed rule files and their shared
+`EditorialPolicy.cjs` readers identical when maintaining the programs.
 Protected source sections and book-specific terminology take precedence.
 
 - Glossary authoring: `Build_Glossary_Runtime.cjs --rules French` prints only the

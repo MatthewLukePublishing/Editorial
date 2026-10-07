@@ -570,7 +570,7 @@ function Invoke-ProductionFinalize {
     $manifestPath = Join-Path $job.JobPath 'job_manifest.json'
     $manifest = Read-JsonFile -Path $manifestPath -Label 'job manifest'
     if ([string]$manifest.status -ne 'imported') { throw "Only an imported production job can be finalized. Current status: $($manifest.status)" }
-    $policyHash = (Get-FileHash -LiteralPath (Join-Path $programRoot 'Code\TranslationEditorialRules.json') -Algorithm SHA256).Hash
+    $policyHash = (Get-FileHash -LiteralPath (Join-Path $programRoot 'Code\Translation Rules.md') -Algorithm SHA256).Hash
     if ($manifest.qa.status -ne 'passed' -or $manifest.qa.editorialRules.sha256 -ne $policyHash -or $manifest.import.editorialRules.sha256 -ne $policyHash) {
         throw 'Finalization requires QA and ICML import under the current editorial rules.'
     }
@@ -620,7 +620,7 @@ function Invoke-ProductionFinalize {
     }
 
     $manifest | Add-Member -NotePropertyName layoutFinalization -NotePropertyValue ([ordered]@{
-        editorialPolicySha256 = (Get-FileHash -LiteralPath (Join-Path $programRoot 'Code\TranslationEditorialRules.json') -Algorithm SHA256).Hash
+        editorialPolicySha256 = (Get-FileHash -LiteralPath (Join-Path $programRoot 'Code\Translation Rules.md') -Algorithm SHA256).Hash
         editorialReport = (Join-Path $job.JobPath 'reports\editorial_layout_application.json')
         editorialReportSha256 = (Get-FileHash -LiteralPath (Join-Path $job.JobPath 'reports\editorial_layout_application.json') -Algorithm SHA256).Hash
         grepPolicySourceSha256 = (Get-FileHash -LiteralPath (Join-Path $programRoot 'Code\TranslationGrepRules.cjs') -Algorithm SHA256).Hash
@@ -758,7 +758,7 @@ function Complete-ProductionJob {
     $productionWorkspace = Get-ValidatedProductionWorkspace -Config $job.Config
     $documentPath = $productionWorkspace.DocumentPath
     $layoutAuditPath = Join-Path $job.JobPath 'reports\layout_audit_final.json'
-    Assert-ProductionCompletionEvidence -Manifest $manifest -DocumentPath $documentPath -LayoutAuditPath $layoutAuditPath -WorkbookPath (Join-Path $job.JobPath 'output\content_import.xlsx') -EditorialPolicyPath (Join-Path $programRoot 'Code\TranslationEditorialRules.json') -GrepPolicyPath (Join-Path $programRoot 'Code\TranslationGrepRules.cjs')
+    Assert-ProductionCompletionEvidence -Manifest $manifest -DocumentPath $documentPath -LayoutAuditPath $layoutAuditPath -WorkbookPath (Join-Path $job.JobPath 'output\content_import.xlsx') -EditorialPolicyPath (Join-Path $programRoot 'Code\Translation Rules.md') -GrepPolicyPath (Join-Path $programRoot 'Code\TranslationGrepRules.cjs')
     $editorialLayout = Read-JsonFile -Path ([string]$manifest.layoutFinalization.editorialReport) -Label 'editorial layout report'
     if ($editorialLayout.status -ne 'passed' -or $editorialLayout.documentSha256 -ne $manifest.layoutFinalization.documentSha256) { throw 'The editorial layout report does not pass for the finalized document.' }
     $grepVerification = Read-JsonFile -Path ([string]$manifest.layoutFinalization.grepReport) -Label 'offline ICML GREP verification'

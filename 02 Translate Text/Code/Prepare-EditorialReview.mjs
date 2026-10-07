@@ -52,8 +52,8 @@ export function prepareEditorialReview(requestedJobPath) {
     if(expected.size) throw Error("Missing previous ICML paths.");
   }
   const baselinePath=path.join(jobPath,"input","editorial_baseline.xlsx");
-  const policyPath=path.join(jobPath,"input","editorial_rules.json");
-  const policyBytes=fs.readFileSync(new URL("../../Code/TranslationEditorialRules.json",import.meta.url));
+  const policyPath=path.join(jobPath,"input","editorial_rules.md");
+  const policyBytes=fs.readFileSync(new URL("../../Code/Translation%20Rules.md",import.meta.url));
   if(digest(policyBytes)!==selected.sha256) throw Error("Editorial policy changed during preparation.");
   const before={config,manifest};
   const nextConfig=structuredClone(config);

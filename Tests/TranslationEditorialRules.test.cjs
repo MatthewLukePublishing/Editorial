@@ -64,7 +64,7 @@ test("editorial review snapshots the accepted workbook and preserves prior impor
     assert.equal(fs.readFileSync(path.join(job,"input","editorial_baseline.xlsx"),"utf8"),"accepted literal workbook bytes");
     assert.equal(fs.readFileSync(icml,"utf8"),"accepted translated ICML");
     assert.equal(prepareEditorialReview(job).status,"already_prepared");
-    fs.writeFileSync(path.join(job,"input","editorial_rules.json"),"{}");
+    fs.writeFileSync(path.join(job,"input","editorial_rules.md"),"{}");
     assert.throws(()=>prepareEditorialReview(job),/policy snapshot changed/);
   }finally{fs.rmSync(folder,{recursive:true,force:true});}
 });
