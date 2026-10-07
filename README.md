@@ -139,13 +139,38 @@ frontier, the run stops instead of substituting another model.
 - `5_Columns Rechecker.js` independently rechecks the nontrivial comparison notes
   and verifies the source workbook and comparison-output hashes.
 - `Style_Guide_Checker.js` checks headerless column-A text against the embedded
-  style requirements.
+  style requirements from the same editable Markdown policy.
 - `Subscription_Harness.js` is the shared ChatGPT-subscription execution boundary
   for those three helper workflows.
 
 Each script is configured with environment variables declared near the beginning
 of the file. It rejects unexpected extra columns instead of silently discarding
 them.
+
+## Editable translation and proofreading rules
+
+[Translation Rules.md](<Translation Rules.md>) contains the supplied workbook's
+complete transcription and the active house-style policy for ten languages.
+Both primary proofreading and independent recheck accept proven violations of
+these rules, including number style (one through one hundred), units, dates,
+acronyms, punctuation, hyphens and wording. The helper workflows load the same
+policy through `Subscription_Harness.js`; the style checker defaults to English
+unless `CHECK_LANGUAGE` is set. Comparison workflows apply each text's language.
+Language conventions and protected quotations, glossary terms, official names,
+codes and exact specifications take precedence over generic English advice.
+
+In the Publishing installation, edit Translate's `Code/Translation Rules.md`:
+all local typo workflows read that canonical file. The copy beside this program
+is the standalone distribution snapshot. Standalone downloads can edit their
+bundled copy. Edit shared-rule prose or add an entry with a unique ID and stage
+metadata, following the file's Editing instructions. Keep distributed Markdown
+copies and `EditorialPolicy.cjs` readers identical before committing changes.
+
+Every review records the exact rules path, version and SHA-256 and rechecks it
+before each query and completion. Missing, malformed or changed rules stop the
+job. Restart after editing rules. Text-only reports cannot verify paragraph
+styles, layers, image stacking or TOC numbering; those remain translation-layout
+checks. Correction highlighting is applied after the editorial review/recheck.
 
 ## Translation-job InDesign workflow
 

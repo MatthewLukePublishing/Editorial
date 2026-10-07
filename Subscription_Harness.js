@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { resolveLatestSubscriptionModel as resolveFreshLatestSubscriptionModel } from "./Resolve-LatestSubscriptionModel.mjs";
+import { loadTypoRules, proofreadingRules, typoRuleEvidence } from "./Translation_Rules.js";
 
 const MODEL_POLICY = "official_latest_frontier";
 const REASONING_EFFORT = "xhigh";
@@ -231,6 +232,7 @@ class SubscriptionHarness {
     this.jobRecordPath = path.resolve(options.jobRecordPath);
     this.configuredModel = String(options.configuredModel || "").trim();
     this.context = options.context || {};
+    this.editorialRules = typoRuleEvidence();
     this.protectedPaths = options.protectedPaths || [];
     assertDistinctPaths([
       ...this.protectedPaths,
@@ -274,6 +276,7 @@ class SubscriptionHarness {
       reasoningEffort: REASONING_EFFORT,
       queryTimeoutMs: CODEX_QUERY_TIMEOUT_MS,
       context: this.context,
+      editorialRules: this.editorialRules,
       queries: [],
       createdAt: now,
       updatedAt: now,
@@ -308,8 +311,13 @@ class SubscriptionHarness {
   async #query(options) {
     await this.initialize();
     const queryId = safeQueryId(options.queryId);
-    const prompt = String(options.prompt || "");
-    if (!prompt.trim()) throw new Error(`Prompt is blank for ${queryId}.`);
+    const requestedPrompt = String(options.prompt || "");
+    if (!requestedPrompt.trim()) throw new Error(`Prompt is blank for ${queryId}.`);
+    const prompt = [
+      "Apply the supplied publishing editorial rules within this workflow's review scope. They take precedence over generic exclusions of style, spacing or capitalization findings. Return only source-supported findings and preserve the requested output schema.",
+      proofreadingRules(this.jobType === "style_guide_check" ? (process.env.CHECK_LANGUAGE || "English") : "", this.editorialRules),
+      requestedPrompt,
+    ].join("\n\n");
     if (!options.schema || typeof options.schema !== "object") {
       throw new Error(`Output schema is missing for ${queryId}.`);
     }
@@ -342,6 +350,7 @@ class SubscriptionHarness {
       modelResolution: resolution,
       reasoningEffort: REASONING_EFFORT,
       metadata: options.metadata || {},
+      editorialRules: this.editorialRules,
       status: "sending",
     };
     this.job.queries.push(queryRecord);
@@ -350,6 +359,7 @@ class SubscriptionHarness {
 
     let response;
     try {
+      loadTypoRules(this.editorialRules);
       const run = runCodex(this.runtime, [
         "exec",
         "-",
@@ -402,6 +412,7 @@ class SubscriptionHarness {
     await this.initialize();
     await this.queryQueue;
     assertJobCanComplete(this.job, this.queryFailure);
+    proofreadingRules("", this.editorialRules);
     this.job.status = "completed";
     this.job.summary = summary;
     this.job.completedAt = new Date().toISOString();

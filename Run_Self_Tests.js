@@ -34,6 +34,7 @@ process.stdout.write("\n== Live_Model_Policy.test.cjs ==\n");
 const modelPolicyTest = spawnSync(process.execPath, [
   "--test",
   path.join(scriptDirectory, "Live_Model_Policy.test.cjs"),
+  path.join(scriptDirectory, "Translation_Rules.test.cjs"),
 ], {
   cwd: scriptDirectory,
   encoding: "utf8",
