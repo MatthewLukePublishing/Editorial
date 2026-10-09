@@ -87,7 +87,7 @@ function readMatrixNoHeaders(filePath, sheetName = null) {
     while (sliced.length < LANGUAGE_COL_COUNT) sliced.push("");
     return sliced;
   });
-  if (!data.some((row) => row.some((value) => value.trim()))) {
+  if (!data.some((row) => row.some((cellText) => cellText.trim()))) {
     throw new Error(`Worksheet '${sName}' contains no reviewable text.`);
   }
   logWithTime(`Loaded ${data.length} data rows from "${filePath}" (no headers). Enforcing ${LANGUAGE_COL_COUNT} columns.`);
