@@ -47,12 +47,12 @@ function readMatrixNoHeaders(filePath, sheetName = null) {
   if (!ws) throw new Error(`Sheet not found: ${sName}`);
 
   const rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: "" });
-  const data = rows.map((r, rowIndex) => {
-    const extraColumn = (r || []).slice(1).findIndex((value) => String(value ?? "").trim());
-    if (extraColumn >= 0) {
+  const data = rows.map((worksheetRow, rowIndex) => {
+    const extraColumnIndex = (worksheetRow || []).slice(1).findIndex((cellValue) => String(cellValue ?? "").trim());
+    if (extraColumnIndex >= 0) {
       throw new Error(`Row ${rowIndex + 1} contains data outside column A.`);
     }
-    return [String((r || [])[0] ?? "")];
+    return [String((worksheetRow || [])[0] ?? "")];
   });
   if (!data.some((row) => row[0].trim())) {
     throw new Error(`Worksheet '${sName}' contains no reviewable text in column A.`);
@@ -156,10 +156,10 @@ async function processAllRows(data, sheetName, harness) {
   };
 
   for (let start = 0; start < data.length; start += ROW_CONCURRENCY) {
-    const batchIdx = Array.from({ length: Math.min(ROW_CONCURRENCY, data.length - start) }, (_, k) => start + k);
+    const batchRowIndexes = Array.from({ length: Math.min(ROW_CONCURRENCY, data.length - start) }, (_, k) => start + k);
 
     await Promise.all(
-      batchIdx.map(async (rowIndex) => {
+      batchRowIndexes.map(async (rowIndex) => {
         const text = (data[rowIndex] && data[rowIndex][0]) ?? ""; // Only Column A
         if (!String(text).trim().length) {
           results[rowIndex] = "No errors detected.";

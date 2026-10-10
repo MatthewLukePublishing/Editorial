@@ -54,16 +54,16 @@ function readMatrixNoHeaders(filePath, sheetName = null) {
   if (!ws) throw new Error(`Sheet not found: ${sName}`);
 
   const rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: "" });
-  const data = rows.map((r, rowIndex) => {
-    const extraColumn = (r || []).slice(LANGUAGE_COL_COUNT).findIndex((value) => String(value ?? "").trim());
-    if (extraColumn >= 0) {
+  const data = rows.map((worksheetRow, rowIndex) => {
+    const extraColumnIndex = (worksheetRow || []).slice(LANGUAGE_COL_COUNT).findIndex((cellValue) => String(cellValue ?? "").trim());
+    if (extraColumnIndex >= 0) {
       throw new Error(`Row ${rowIndex + 1} contains data beyond the required five columns.`);
     }
-    const sliced = (r || []).slice(0, LANGUAGE_COL_COUNT).map(v => String(v ?? ""));
-    while (sliced.length < LANGUAGE_COL_COUNT) sliced.push("");
-    return sliced;
+    const normalizedRow = (worksheetRow || []).slice(0, LANGUAGE_COL_COUNT).map(cellValue => String(cellValue ?? ""));
+    while (normalizedRow.length < LANGUAGE_COL_COUNT) normalizedRow.push("");
+    return normalizedRow;
   });
-  if (!data.some((row) => row.some((value) => value.trim()))) {
+  if (!data.some((row) => row.some((cellValue) => cellValue.trim()))) {
     throw new Error(`Worksheet '${sName}' contains no reviewable text.`);
   }
   logWithTime(`Loaded ${data.length} data rows (no headers). Enforcing ${LANGUAGE_COL_COUNT} columns.`);
@@ -205,12 +205,12 @@ async function reviewRow({ rowIndex, texts, harness }) {
     throw new Error(`Invalid structured response for row ${rowIndex + 1}.`);
   }
   const notes = new Array(LANGUAGE_COL_COUNT);
-  for (const result of response.notes) {
-    const targetIndex = Number(result?.targetIndex);
+  for (const targetNote of response.notes) {
+    const targetIndex = Number(targetNote?.targetIndex);
     if (!Number.isInteger(targetIndex) || targetIndex < 1 || targetIndex > LANGUAGE_COL_COUNT || notes[targetIndex - 1] !== undefined) {
       throw new Error(`Unexpected or duplicate targetIndex in row ${rowIndex + 1}.`);
     }
-    notes[targetIndex - 1] = sanitizeNote(String(result.note || "").trim(), texts);
+    notes[targetIndex - 1] = sanitizeNote(String(targetNote.note || "").trim(), texts);
   }
   if (notes.some((note) => note === undefined)) throw new Error(`Missing target note in row ${rowIndex + 1}.`);
   return notes;
@@ -230,10 +230,10 @@ async function processAllRows(data, sheetName, harness) {
   };
 
   for (let start = 0; start < data.length; start += ROW_CONCURRENCY) {
-    const batchIdx = Array.from({ length: Math.min(ROW_CONCURRENCY, data.length - start) }, (_, k) => start + k);
+    const batchRowIndexes = Array.from({ length: Math.min(ROW_CONCURRENCY, data.length - start) }, (_, k) => start + k);
 
     await Promise.all(
-      batchIdx.map(async (rowIndex) => {
+      batchRowIndexes.map(async (rowIndex) => {
         const texts = data[rowIndex];
         if (!texts.some(t => String(t).trim().length)) {
           results[rowIndex] = new Array(LANGUAGE_COL_COUNT).fill("No errors detected.");
