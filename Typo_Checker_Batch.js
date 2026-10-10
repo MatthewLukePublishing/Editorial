@@ -28,32 +28,32 @@ function normalizedPath(filePath) {
 }
 
 function assertDistinctPaths(artifacts) {
-  const seen = new Map();
+  const artifactLabelsByNormalizedPath = new Map();
   for (const artifact of artifacts) {
-    const resolved = normalizedPath(artifact.path);
-    const existing = seen.get(resolved);
-    if (existing) throw new Error(`${artifact.label} must not overwrite ${existing}: ${artifact.path}`);
-    seen.set(resolved, artifact.label);
+    const normalizedArtifactPath = normalizedPath(artifact.path);
+    const existingArtifactLabel = artifactLabelsByNormalizedPath.get(normalizedArtifactPath);
+    if (existingArtifactLabel) throw new Error(`${artifact.label} must not overwrite ${existingArtifactLabel}: ${artifact.path}`);
+    artifactLabelsByNormalizedPath.set(normalizedArtifactPath, artifact.label);
   }
 }
 
-function subscriptionEnvironment(source = process.env) {
-  const child = { ...source };
-  for (const name of Object.keys(child)) {
+function subscriptionEnvironment(sourceEnvironment = process.env) {
+  const childEnvironment = { ...sourceEnvironment };
+  for (const environmentVariableName of Object.keys(childEnvironment)) {
     if (
-      (/^(?:OPENAI_|AZURE_OPENAI_)/i.test(name) && !/^OPENAI_MODEL$/i.test(name)) ||
-      /^(?:CODEX_API_KEY|CODEX_ACCESS_TOKEN)$/i.test(name)
+      (/^(?:OPENAI_|AZURE_OPENAI_)/i.test(environmentVariableName) && !/^OPENAI_MODEL$/i.test(environmentVariableName)) ||
+      /^(?:CODEX_API_KEY|CODEX_ACCESS_TOKEN)$/i.test(environmentVariableName)
     ) {
-      delete child[name];
+      delete childEnvironment[environmentVariableName];
     }
   }
-  delete child.OUTPUT_JSON;
-  delete child.TYPO_CHECKER_BATCH_SELF_TEST;
-  return child;
+  delete childEnvironment.OUTPUT_JSON;
+  delete childEnvironment.TYPO_CHECKER_BATCH_SELF_TEST;
+  return childEnvironment;
 }
 
 function runLauncherSelfTest() {
-  const cleaned = subscriptionEnvironment({
+  const cleanedEnvironment = subscriptionEnvironment({
     OPENAI_MODEL: "gpt-test-frontier",
     OPENAI_API_KEY: "secret",
     OPENAI_FUTURE_CREDENTIAL: "secret",
@@ -62,29 +62,29 @@ function runLauncherSelfTest() {
     SAFE_VALUE: "retained",
   });
   if (
-    cleaned.OPENAI_MODEL !== "gpt-test-frontier" ||
-    cleaned.OPENAI_API_KEY ||
-    cleaned.OPENAI_FUTURE_CREDENTIAL ||
-    cleaned.AZURE_OPENAI_ENDPOINT ||
-    cleaned.CODEX_ACCESS_TOKEN ||
-    cleaned.SAFE_VALUE !== "retained"
+    cleanedEnvironment.OPENAI_MODEL !== "gpt-test-frontier" ||
+    cleanedEnvironment.OPENAI_API_KEY ||
+    cleanedEnvironment.OPENAI_FUTURE_CREDENTIAL ||
+    cleanedEnvironment.AZURE_OPENAI_ENDPOINT ||
+    cleanedEnvironment.CODEX_ACCESS_TOKEN ||
+    cleanedEnvironment.SAFE_VALUE !== "retained"
   ) {
     throw new Error("Subscription environment isolation self-test failed.");
   }
 }
 
-function runChecker(environment) {
-  const run = spawnSync(process.execPath, [CHECKER_PATH], {
-    env: environment,
+function runChecker(checkerEnvironment) {
+  const checkerProcessResult = spawnSync(process.execPath, [CHECKER_PATH], {
+    env: checkerEnvironment,
     cwd: process.cwd(),
     encoding: "utf8",
     maxBuffer: 64 * 1024 * 1024,
     windowsHide: true,
   });
-  if (run.stdout) process.stdout.write(run.stdout);
-  if (run.stderr) process.stderr.write(run.stderr);
-  if (run.error || run.status !== 0) {
-    throw new Error(`Primary typo checker failed with exit code ${run.status}: ${run.error?.message || "see diagnostics above"}`);
+  if (checkerProcessResult.stdout) process.stdout.write(checkerProcessResult.stdout);
+  if (checkerProcessResult.stderr) process.stderr.write(checkerProcessResult.stderr);
+  if (checkerProcessResult.error || checkerProcessResult.status !== 0) {
+    throw new Error(`Primary typo checker failed with exit code ${checkerProcessResult.status}: ${checkerProcessResult.error?.message || "see diagnostics above"}`);
   }
 }
 
@@ -96,11 +96,11 @@ function main() {
     throw new Error(`Primary typo checker not found: ${CHECKER_PATH}`);
   }
 
-  const environment = subscriptionEnvironment();
+  const checkerEnvironment = subscriptionEnvironment();
   if (SELF_TEST) {
     runLauncherSelfTest();
-    environment.TYPO_CHECKER_SELF_TEST = "true";
-    runChecker(environment);
+    checkerEnvironment.TYPO_CHECKER_SELF_TEST = "true";
+    runChecker(checkerEnvironment);
     return;
   }
 
@@ -109,11 +109,11 @@ function main() {
     { label: "OUTPUT_XLSX", path: OUTPUT_XLSX },
     { label: "JOB_RECORD_JSON", path: JOB_RECORD_JSON },
   ]);
-  environment.INPUT_XLSX = INPUT_XLSX;
-  environment.OUTPUT_XLSX = OUTPUT_XLSX;
-  environment.JOB_RECORD_JSON = JOB_RECORD_JSON;
-  environment.ALLOW_STANDALONE_INPUT = "true";
-  runChecker(environment);
+  checkerEnvironment.INPUT_XLSX = INPUT_XLSX;
+  checkerEnvironment.OUTPUT_XLSX = OUTPUT_XLSX;
+  checkerEnvironment.JOB_RECORD_JSON = JOB_RECORD_JSON;
+  checkerEnvironment.ALLOW_STANDALONE_INPUT = "true";
+  runChecker(checkerEnvironment);
 }
 
 try {
