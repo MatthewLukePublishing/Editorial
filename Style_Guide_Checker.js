@@ -42,31 +42,31 @@ function logWithTime(msg) {
 function readMatrixNoHeaders(filePath, sheetName = null) {
   if (!fs.existsSync(filePath)) throw new Error(`Input file not found: ${filePath}`);
   const wb = XLSX.readFile(filePath);
-  const sName = sheetName || wb.SheetNames[0];
-  const ws = wb.Sheets[sName];
-  if (!ws) throw new Error(`Sheet not found: ${sName}`);
+  const selectedSheetName = sheetName || wb.SheetNames[0];
+  const worksheet = wb.Sheets[selectedSheetName];
+  if (!worksheet) throw new Error(`Sheet not found: ${selectedSheetName}`);
 
-  const rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: "" });
-  const data = rows.map((worksheetRow, rowIndex) => {
+  const rows = XLSX.utils.sheet_to_json(worksheet, { header: 1, raw: false, defval: "" });
+  const normalizedColumnARows = rows.map((worksheetRow, rowIndex) => {
     const extraColumnIndex = (worksheetRow || []).slice(1).findIndex((cellValue) => String(cellValue ?? "").trim());
     if (extraColumnIndex >= 0) {
       throw new Error(`Row ${rowIndex + 1} contains data outside column A.`);
     }
     return [String((worksheetRow || [])[0] ?? "")];
   });
-  if (!data.some((row) => row[0].trim())) {
-    throw new Error(`Worksheet '${sName}' contains no reviewable text in column A.`);
+  if (!normalizedColumnARows.some((row) => row[0].trim())) {
+    throw new Error(`Worksheet '${selectedSheetName}' contains no reviewable text in column A.`);
   }
-  logWithTime(`Loaded ${data.length} data rows (only column A).`);
-  return { data, sheetName: sName };
+  logWithTime(`Loaded ${normalizedColumnARows.length} data rows (only column A).`);
+  return { data: normalizedColumnARows, sheetName: selectedSheetName };
 }
 
 function writeMatrixNoHeaders(filePath, sheetName, matrix) {
   const resolved = path.resolve(filePath);
   fs.mkdirSync(path.dirname(resolved), { recursive: true });
-  const ws = XLSX.utils.aoa_to_sheet(matrix);
+  const worksheet = XLSX.utils.aoa_to_sheet(matrix);
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, safeWorksheetName(sheetName));
+  XLSX.utils.book_append_sheet(wb, worksheet, safeWorksheetName(sheetName));
   const temporary = `${resolved}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp.xlsx`;
   try {
     XLSX.writeFile(wb, temporary);
@@ -83,10 +83,10 @@ function sha256File(filePath) {
 function readStableMatrixNoHeaders(filePath, sheetName = null) {
   if (!fs.existsSync(filePath)) throw new Error(`Input file not found: ${filePath}`);
   const before = sha256File(filePath);
-  const result = readMatrixNoHeaders(filePath, sheetName);
+  const stableReadResult = readMatrixNoHeaders(filePath, sheetName);
   const after = sha256File(filePath);
   if (before !== after) throw new Error(`Input workbook changed while it was being read: ${filePath}`);
-  return { ...result, sha256: after };
+  return { ...stableReadResult, sha256: after };
 }
 
 // ======== Schema ========
@@ -143,8 +143,8 @@ async function reviewCell({ rowIndex, text, harness }) {
 }
 
 // ======== Process Rows ========
-async function processAllRows(data, sheetName, harness) {
-  const results = new Array(data.length).fill("");
+async function processAllRows(columnARows, sheetName, harness) {
+  const results = new Array(columnARows.length).fill("");
   let processed = 0;
 
   const flushIfNeeded = () => {
@@ -155,18 +155,18 @@ async function processAllRows(data, sheetName, harness) {
     }
   };
 
-  for (let start = 0; start < data.length; start += ROW_CONCURRENCY) {
-    const batchRowIndexes = Array.from({ length: Math.min(ROW_CONCURRENCY, data.length - start) }, (_, k) => start + k);
+  for (let start = 0; start < columnARows.length; start += ROW_CONCURRENCY) {
+    const batchRowIndexes = Array.from({ length: Math.min(ROW_CONCURRENCY, columnARows.length - start) }, (_, k) => start + k);
 
     await Promise.all(
       batchRowIndexes.map(async (rowIndex) => {
-        const text = (data[rowIndex] && data[rowIndex][0]) ?? ""; // Only Column A
+        const text = (columnARows[rowIndex] && columnARows[rowIndex][0]) ?? ""; // Only Column A
         if (!String(text).trim().length) {
           results[rowIndex] = "No errors detected.";
-          logWithTime(`⚠️ Empty A${rowIndex + 1} / Row ${rowIndex + 1}/${data.length}`);
+          logWithTime(`⚠️ Empty A${rowIndex + 1} / Row ${rowIndex + 1}/${columnARows.length}`);
         } else {
           results[rowIndex] = await reviewCell({ rowIndex, text, harness });
-          logWithTime(`✅ Row ${rowIndex + 1}/${data.length} (A${rowIndex + 1}) done`);
+          logWithTime(`✅ Row ${rowIndex + 1}/${columnARows.length} (A${rowIndex + 1}) done`);
         }
 
         processed++;
@@ -178,7 +178,7 @@ async function processAllRows(data, sheetName, harness) {
   const finalMatrix = results.map(r => [r || ""]);
   writeMatrixNoHeaders(OUTPUT_XLSX, resultWorksheetName(sheetName, "_colA"), finalMatrix);
   logWithTime(`💾 Final file written: ${OUTPUT_XLSX}`);
-  logWithTime(`✅ All ${data.length} rows completed.`);
+  logWithTime(`✅ All ${columnARows.length} rows completed.`);
 }
 
 // ======== Entry ========
@@ -189,7 +189,7 @@ let harness;
       console.log(JSON.stringify(runSubscriptionHarnessSelfTest(), null, 2));
       return;
     }
-    const { data, sheetName, sha256: inputSha256 } = readStableMatrixNoHeaders(INPUT_XLSX, SHEET_NAME);
+    const { data: columnARows, sheetName, sha256: inputSha256 } = readStableMatrixNoHeaders(INPUT_XLSX, SHEET_NAME);
     harness = createSubscriptionHarness({
       jobType: "style_guide_check",
       jobRecordPath: JOB_RECORD_JSON,
@@ -206,9 +206,9 @@ let harness;
       },
     });
     await harness.initialize();
-    await processAllRows(data, sheetName, harness);
+    await processAllRows(columnARows, sheetName, harness);
     await harness.complete({
-      rowCount: data.length,
+      rowCount: columnARows.length,
       outputPath: path.resolve(OUTPUT_XLSX),
       outputSha256: sha256File(OUTPUT_XLSX),
     });

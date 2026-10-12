@@ -49,12 +49,12 @@ function logWithTime(msg) {
 function readMatrixNoHeaders(filePath, sheetName = null) {
   if (!fs.existsSync(filePath)) throw new Error(`Input file not found: ${filePath}`);
   const wb = XLSX.readFile(filePath);
-  const sName = sheetName || wb.SheetNames[0];
-  const ws = wb.Sheets[sName];
-  if (!ws) throw new Error(`Sheet not found: ${sName}`);
+  const selectedSheetName = sheetName || wb.SheetNames[0];
+  const worksheet = wb.Sheets[selectedSheetName];
+  if (!worksheet) throw new Error(`Sheet not found: ${selectedSheetName}`);
 
-  const rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: "" });
-  const data = rows.map((worksheetRow, rowIndex) => {
+  const rows = XLSX.utils.sheet_to_json(worksheet, { header: 1, raw: false, defval: "" });
+  const normalizedTranslationRows = rows.map((worksheetRow, rowIndex) => {
     const extraColumnIndex = (worksheetRow || []).slice(LANGUAGE_COL_COUNT).findIndex((cellValue) => String(cellValue ?? "").trim());
     if (extraColumnIndex >= 0) {
       throw new Error(`Row ${rowIndex + 1} contains data beyond the required five columns.`);
@@ -63,19 +63,19 @@ function readMatrixNoHeaders(filePath, sheetName = null) {
     while (normalizedRow.length < LANGUAGE_COL_COUNT) normalizedRow.push("");
     return normalizedRow;
   });
-  if (!data.some((row) => row.some((cellValue) => cellValue.trim()))) {
-    throw new Error(`Worksheet '${sName}' contains no reviewable text.`);
+  if (!normalizedTranslationRows.some((row) => row.some((cellValue) => cellValue.trim()))) {
+    throw new Error(`Worksheet '${selectedSheetName}' contains no reviewable text.`);
   }
-  logWithTime(`Loaded ${data.length} data rows (no headers). Enforcing ${LANGUAGE_COL_COUNT} columns.`);
-  return { data, sheetName: sName };
+  logWithTime(`Loaded ${normalizedTranslationRows.length} data rows (no headers). Enforcing ${LANGUAGE_COL_COUNT} columns.`);
+  return { data: normalizedTranslationRows, sheetName: selectedSheetName };
 }
 
 function writeMatrixNoHeaders(filePath, sheetName, matrix) {
   const resolved = path.resolve(filePath);
   fs.mkdirSync(path.dirname(resolved), { recursive: true });
-  const ws = XLSX.utils.aoa_to_sheet(matrix);
+  const worksheet = XLSX.utils.aoa_to_sheet(matrix);
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, safeWorksheetName(sheetName));
+  XLSX.utils.book_append_sheet(wb, worksheet, safeWorksheetName(sheetName));
   const temporary = `${resolved}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp.xlsx`;
   try {
     XLSX.writeFile(wb, temporary);
@@ -92,10 +92,10 @@ function sha256File(filePath) {
 function readStableMatrixNoHeaders(filePath, sheetName = null) {
   if (!fs.existsSync(filePath)) throw new Error(`Input file not found: ${filePath}`);
   const before = sha256File(filePath);
-  const result = readMatrixNoHeaders(filePath, sheetName);
+  const stableReadResult = readMatrixNoHeaders(filePath, sheetName);
   const after = sha256File(filePath);
   if (before !== after) throw new Error(`Input workbook changed while it was being read: ${filePath}`);
-  return { ...result, sha256: after };
+  return { ...stableReadResult, sha256: after };
 }
 
 // ======== Schema & Prompt ========
@@ -217,8 +217,8 @@ async function reviewRow({ rowIndex, texts, harness }) {
 }
 
 // ======== Main ========
-async function processAllRows(data, sheetName, harness) {
-  const results = new Array(data.length).fill(null);
+async function processAllRows(translationRows, sheetName, harness) {
+  const results = new Array(translationRows.length).fill(null);
   let processed = 0;
 
   const flushIfNeeded = () => {
@@ -229,18 +229,18 @@ async function processAllRows(data, sheetName, harness) {
     }
   };
 
-  for (let start = 0; start < data.length; start += ROW_CONCURRENCY) {
-    const batchRowIndexes = Array.from({ length: Math.min(ROW_CONCURRENCY, data.length - start) }, (_, k) => start + k);
+  for (let start = 0; start < translationRows.length; start += ROW_CONCURRENCY) {
+    const batchRowIndexes = Array.from({ length: Math.min(ROW_CONCURRENCY, translationRows.length - start) }, (_, k) => start + k);
 
     await Promise.all(
       batchRowIndexes.map(async (rowIndex) => {
-        const texts = data[rowIndex];
+        const texts = translationRows[rowIndex];
         if (!texts.some(t => String(t).trim().length)) {
           results[rowIndex] = new Array(LANGUAGE_COL_COUNT).fill("No errors detected.");
-          logWithTime(`⚠️ Empty row ${rowIndex + 1}/${data.length}`);
+          logWithTime(`⚠️ Empty row ${rowIndex + 1}/${translationRows.length}`);
         } else {
           results[rowIndex] = await reviewRow({ rowIndex, texts, harness });
-          logWithTime(`✅ Row ${rowIndex + 1}/${data.length} done`);
+          logWithTime(`✅ Row ${rowIndex + 1}/${translationRows.length} done`);
         }
 
         processed++;
@@ -251,7 +251,7 @@ async function processAllRows(data, sheetName, harness) {
 
   writeMatrixNoHeaders(OUTPUT_XLSX, resultWorksheetName(sheetName, "_diffs"), results);
   logWithTime(`💾 Final file written: ${OUTPUT_XLSX}`);
-  logWithTime(`✅ All ${data.length} rows completed.`);
+  logWithTime(`✅ All ${translationRows.length} rows completed.`);
 }
 
 // ======== Entry ========
@@ -262,7 +262,7 @@ let harness;
       console.log(JSON.stringify(runSubscriptionHarnessSelfTest(), null, 2));
       return;
     }
-    const { data, sheetName, sha256: inputSha256 } = readStableMatrixNoHeaders(INPUT_XLSX, SHEET_NAME);
+    const { data: translationRows, sheetName, sha256: inputSha256 } = readStableMatrixNoHeaders(INPUT_XLSX, SHEET_NAME);
     harness = createSubscriptionHarness({
       jobType: "five_column_translation_comparison",
       jobRecordPath: JOB_RECORD_JSON,
@@ -280,9 +280,9 @@ let harness;
       },
     });
     await harness.initialize();
-    await processAllRows(data, sheetName, harness);
+    await processAllRows(translationRows, sheetName, harness);
     await harness.complete({
-      rowCount: data.length,
+      rowCount: translationRows.length,
       outputPath: path.resolve(OUTPUT_XLSX),
       outputSha256: sha256File(OUTPUT_XLSX),
     });
