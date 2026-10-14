@@ -80,6 +80,24 @@ Run commands from the repository root. A normal text job follows this sequence:
 
 Use `-Action Status` at any time. If Adobe relinking was deferred because an InDesign document was open, save and close it, then use `-Action Export` before continuing. Use `-Action Validate` after an authorized workbook correction. `Deactivate` and `Activate` switch the single active-job pointer without moving a self-contained edition.
 
+For an unattended run with no visible PowerShell worker window:
+
+```powershell
+$run = & '.\Run-Translation-Job.ps1' -Action Translate -Background
+Get-Content -LiteralPath $run.StdoutPath -Encoding UTF8 -Tail 20
+Get-Content -LiteralPath $run.StatusPath -Encoding UTF8 -Raw
+```
+
+`-Background` returns immediately with `ProcessId`, `StdoutPath`,
+`StderrPath` and `StatusPath`. UTF-8 logs and a completion-status file are
+kept under `02 Translate Text/Jobs/Launcher Runs`. Status changes from
+`Running` to `Succeeded` or `Failed`, with the worker exit code.
+Wait for the worker and check the job's status before importing, finalizing,
+changing the active job or starting another Adobe operation. A deliberately
+paused batch can finish its worker successfully while the translation remains
+incomplete; its log records `TRANSLATION_PAUSED`. Omit `-Background` for the
+synchronous sequence above or when troubleshooting.
+
 Other stages:
 
 ```powershell

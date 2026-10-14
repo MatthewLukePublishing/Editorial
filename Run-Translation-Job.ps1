@@ -23,7 +23,8 @@ param(
     [string]$ReasoningEffort = 'xhigh',
     [ValidateRange(1, 1000)]
     [int]$MaxBatches,
-    [switch]$Force
+    [switch]$Force,
+    [switch]$Background
 )
 
 $script:ProductsRootArgument = $ProductsRoot
@@ -913,6 +914,14 @@ function Move-TranslationJobToArchive {
         -ActivePointerPath $activeJobPath -ExpectedJobId ([string]$active.jobId) `
         -ExpectedBook ([string]$active.book) -ExpectedLanguage ([string]$active.targetLanguage) -Force:$Force
     Write-Output "JOB_ARCHIVED|destination=$($result.Destination)|recovery=$($result.RecoveryMode)"
+}
+
+if ($Background) {
+    . (Join-Path $programRoot 'Code\HiddenPowerShell.ps1')
+    $workerParameters = @{} + $PSBoundParameters
+    $workerParameters.Remove('Background')
+    Start-HiddenPowerShell -ScriptPath $PSCommandPath -Parameters $workerParameters -LogDirectory (Join-Path $jobsRoot 'Launcher Runs')
+    return
 }
 
 switch ($Action) {
