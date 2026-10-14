@@ -84,4 +84,18 @@ if (process.platform === "win32") {
   }
 }
 
+if (process.platform === "win32") {
+  const powershellPath = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  const hiddenTest = spawnSync(powershellPath, [
+    "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+    "-File", path.join(scriptDirectory, "HiddenPowerShell.test.ps1"),
+  ], { cwd: scriptDirectory, encoding: "utf8", windowsHide: true, timeout: 60000 });
+  if (hiddenTest.stdout) process.stdout.write(hiddenTest.stdout);
+  if (hiddenTest.stderr) process.stderr.write(hiddenTest.stderr);
+  if (hiddenTest.error || hiddenTest.status !== 0) {
+    console.error("Hidden PowerShell integration tests failed.");
+    process.exit(hiddenTest.status || 1);
+  }
+}
+
 console.log("\nAll offline self-tests passed.");

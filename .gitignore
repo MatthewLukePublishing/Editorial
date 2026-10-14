@@ -18,6 +18,7 @@ typo_checks/
 /PROJECT.md
 
 # Temporary and editor files
+.tmp/
 *.log
 *.tmp
 *.temp

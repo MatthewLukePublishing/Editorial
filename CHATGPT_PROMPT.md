@@ -16,7 +16,13 @@ and download that commit's source archive into a new temporary folder. Reject a
 draft, prerelease, mutable branch archive, incomplete archive, or mismatched
 package version. From that fresh archive, run:
 
-Run_Latest_Typo_Checker.ps1 -Language German
+Run_Latest_Typo_Checker.ps1 -Language German -Background
+
+Run PowerShell with its window hidden. Keep the returned process ID, stdout log,
+stderr log and status-file paths. The worker returns control immediately and
+runs without a visible PowerShell window. Monitor its status and UTF-8 logs,
+and report completion only after the worker succeeds and the review outputs
+are verified. A failed worker must be reported with its error-log path.
 
 The launcher must independently re-resolve and download the latest stable release
 and must stop if the release changes during preparation. Do not run the JSX

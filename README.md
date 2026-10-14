@@ -52,8 +52,17 @@ If `Run_Latest_Typo_Checker.ps1` is already available locally, the direct comman
 is:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\Run_Latest_Typo_Checker.ps1 -Language German
+powershell -ExecutionPolicy Bypass -File .\Run_Latest_Typo_Checker.ps1 -Language German -Background
 ```
+
+The recommended `-Background` mode starts a hidden, noninteractive PowerShell
+worker and returns immediately, so other applications remain usable. It returns
+`ProcessId`, `StdoutPath`, `StderrPath` and `StatusPath`. Progress and errors are
+saved under `typo_checks/launcher_runs` beside the launcher. Read those files as
+UTF-8; `status.json` records `Running`, then `Succeeded` or `Failed` and the
+worker exit code. Launching successfully does not mean the review has finished.
+Wait for completion before starting another InDesign operation. Omit
+`-Background` to run synchronously with console output for troubleshooting.
 
 The launcher does not trust or execute a previously downloaded checker. On every
 run it:

@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$Language,
+    [switch]$Background,
     [switch]$SelfTest
 )
 
@@ -205,6 +206,7 @@ function Invoke-OfflineSelfTest {
 }
 
 if ($SelfTest) {
+    if ($Background) { throw '-SelfTest cannot be combined with -Background.' }
     Invoke-OfflineSelfTest
     exit 0
 }
@@ -213,6 +215,13 @@ if ($env:OS -ne 'Windows_NT') {
     throw 'This launcher requires Windows and Adobe InDesign 2026.'
 }
 Assert-Language -Value $Language
+if ($Background) {
+    . (Join-Path $PSScriptRoot 'HiddenPowerShell.ps1')
+    $workerParameters = @{} + $PSBoundParameters
+    $workerParameters.Remove('Background')
+    Start-HiddenPowerShell -ScriptPath $PSCommandPath -Parameters $workerParameters -LogDirectory (Join-Path $PSScriptRoot 'typo_checks\launcher_runs')
+    return
+}
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $workspace = $null
