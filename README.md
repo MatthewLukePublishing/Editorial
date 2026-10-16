@@ -31,7 +31,9 @@ the account cannot use it, or `xhigh` is unavailable, no model query is sent.
 ## Requirements
 
 - Windows 10 or Windows 11
-- Node.js 20 or newer
+- Node.js 24 or newer
+- The shared Book Standards installation, configured with `BOOK_STANDARDS_HOME`
+  when it is not at `../InDesign/Book Standards`.
 - Adobe InDesign 2026 for the open-document workflow
 - The official [Codex CLI](https://learn.chatgpt.com/docs/codex/cli), signed in with
   **Sign in with ChatGPT**
@@ -148,7 +150,7 @@ frontier, the run stops instead of substituting another model.
 - `5_Columns Rechecker.js` independently rechecks the nontrivial comparison notes
   and verifies the source workbook and comparison-output hashes.
 - `Style_Guide_Checker.js` checks headerless column-A text against the embedded
-  style requirements from the same editable Markdown policy.
+  style requirements from the shared Book Standards database.
 - `Subscription_Harness.js` is the shared ChatGPT-subscription execution boundary
   for those three helper workflows.
 
@@ -158,8 +160,8 @@ them.
 
 ## Editable translation and proofreading rules
 
-[Translation Rules.md](<Translation Rules.md>) contains the supplied workbook's
-complete transcription and the active house-style policy for ten languages.
+The shared `Book Standards.sqlite` database contains the original workbook
+transcription and the active house-style policy for ten languages.
 Both primary proofreading and independent recheck accept proven violations of
 these rules, including number style (one through one hundred), units, dates,
 acronyms, punctuation, hyphens and wording. The helper workflows load the same
@@ -168,12 +170,13 @@ unless `CHECK_LANGUAGE` is set. Comparison workflows apply each text's language.
 Language conventions and protected quotations, glossary terms, official names,
 codes and exact specifications take precedence over generic English advice.
 
-In the Publishing installation, edit Translate's `Code/Translation Rules.md`:
-all local typo workflows read that canonical file. The copy beside this program
-is the standalone distribution snapshot. Standalone downloads can edit their
-bundled copy. Edit shared-rule prose or add an entry with a unique ID and stage
-metadata, following the file's Editing instructions. Keep distributed Markdown
-copies and `EditorialPolicy.cjs` readers identical before committing changes.
+Typos and Translate both load the shared database through the Book Standards
+`EditorialPolicy.cjs` reader. Edit active rules in its `editorial_rule` table
+and language settings in `editorial_language`, following the Book Standards
+README. The embedded source documents are immutable import evidence.
+No local rule snapshot or fallback is retained. Standalone installations must
+set `BOOK_STANDARDS_HOME` to the shared installation directory before running,
+including before a downloaded release runs its self-tests.
 
 Every review records the exact rules path, version and SHA-256 and rechecks it
 before each query and completion. Missing, malformed or changed rules stop the

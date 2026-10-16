@@ -4,8 +4,9 @@ const test = require("node:test");
 const fs = require("node:fs");
 const path = require("node:path");
 const reader = require("./EditorialPolicy.cjs");
-const RULE_PATH = path.join(__dirname, "Translation Rules.md");
-const markdown = fs.readFileSync(RULE_PATH, "utf8");
+const RULE_PATH = reader.POLICY_PATH;
+const standards = require(path.join(path.dirname(RULE_PATH), "BookStandards.cjs"));
+const markdown = standards.sourceDocument("Translation Rules.md").toString("utf8");
 function compressionDigest(value) {
   const sorted = item => Array.isArray(item) ? item.map(sorted) :
     item && typeof item === "object" ? Object.fromEntries(Object.keys(item).sort().map(key => [key, sorted(item[key])])) : item;
@@ -82,7 +83,7 @@ test("Markdown carries all ten languages and stage-scoped original policy", () =
   assert.match(policy.languages[0].hyphens, /preassault/);
   for (const language of reader.LANGUAGES) {
     for (const stage of reader.STAGES) {
-      const selected = reader.resolveEditorialRules(path.join(__dirname, "Translation Rules.md"), language, stage);
+      const selected = reader.resolveEditorialRules(reader.POLICY_PATH, language, stage);
       assert.ok(selected.rules.every(rule => rule.stages.includes(stage)));
     }
   }
@@ -106,7 +107,7 @@ test("malformed, missing, duplicate and unsupported rule definitions fail closed
     markdown.replace("### date_spacing", "### invalid-rule-id"),
   ]) assert.throws(() => reader.parseEditorialMarkdown(bad));
   assert.throws(() => reader.loadEditorialRules(path.join(__dirname, "missing-policy.md")));
-  assert.throws(() => reader.editorialPrompt(path.join(__dirname, "Translation Rules.md"), "French", "text", "outdated"), /rules changed/);
+  assert.throws(() => reader.editorialPrompt(reader.POLICY_PATH, "French", "text", "outdated"), /rules changed/);
 });
 
 test("the complete workbook transcription keeps 186 cells and literal special spaces", () => {
@@ -119,15 +120,15 @@ test("the complete workbook transcription keeps 186 cells and literal special sp
   assert.match(cell("D37"), /\(\+\|/); // Retain the original bare plus as reference.
   assert.match(cell("B51"), /one through one hundred/);
   assert.match(cell("B59"), /Bold is for emphasis/);
-  assert.doesNotMatch(reader.editorialPrompt(path.join(__dirname, "Translation Rules.md"), "French", "text"), /GREP Code|Sheet1!D37|\[layer_order\]|preassault/);
+  assert.doesNotMatch(reader.editorialPrompt(reader.POLICY_PATH, "French", "text"), /GREP Code|Sheet1!D37|\[layer_order\]|preassault/);
 });
 
-test("standalone distribution and canonical Publishing copies stay identical", () => {
+test("Typos and Translate read the same live database", () => {
   const canonical = path.resolve(__dirname, "../Translate/Code");
   if (!fs.existsSync(canonical)) return;
-  for (const filename of ["Translation Rules.md", "EditorialPolicy.cjs"]) {
-    assert.deepEqual(fs.readFileSync(path.join(__dirname, filename)), fs.readFileSync(path.join(canonical, filename)));
-  }
+  const translationReader = require(path.join(canonical, "EditorialPolicy.cjs"));
+  assert.equal(translationReader, reader);
+  assert.deepEqual(reader.loadEditorialRules(RULE_PATH).policy, reader.parseEditorialMarkdown(markdown));
 });
 
 test("primary proofreading and independent recheck both use the same hash-bound rules", async () => {

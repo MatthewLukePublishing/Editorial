@@ -142,12 +142,12 @@ function Remove-SafeWorkspace {
 function Get-NodeExecutable {
     $command = Get-Command node.exe -ErrorAction SilentlyContinue
     if ($null -eq $command) {
-        throw 'Node.js 20 or newer is required and was not found on PATH.'
+        throw 'Node.js 24 or newer is required and was not found on PATH.'
     }
     $versionText = (& $command.Source --version).Trim().TrimStart('v')
     $version = $null
-    if (-not [Version]::TryParse($versionText, [ref]$version) -or $version.Major -lt 20) {
-        throw "Node.js 20 or newer is required; found '$versionText'."
+    if (-not [Version]::TryParse($versionText, [ref]$version) -or $version.Major -lt 24) {
+        throw "Node.js 24 or newer is required; found '$versionText'."
     }
     return $command.Source
 }
@@ -198,7 +198,7 @@ function Invoke-OfflineSelfTest {
             immutableCommitRequired = $true
             canonicalRepositoryLocked = $true
             safeCleanupBoundary = $true
-            node20OrNewer = $true
+            node24OrNewer = $true
         } | ConvertTo-Json
     } finally {
         Remove-SafeWorkspace -Path $testWorkspace

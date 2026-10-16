@@ -1,17 +1,10 @@
-import fs from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import policyReader from "./EditorialPolicy.cjs";
 
-const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
-const canonicalTranslationProjectRoot = path.resolve(scriptDirectory, "../Translate");
-const canonicalRulesPath = path.join(canonicalTranslationProjectRoot, "Code", "Translation Rules.md");
-const bundledRulesPath = path.join(scriptDirectory, "Translation Rules.md");
-
 export function loadTypoRules(expected) {
-  // A present canonical project must supply its rules. Missing/invalid current
-  // rules never silently fall back to an older distribution copy.
-  const sourcePath = expected?.path || (fs.existsSync(canonicalTranslationProjectRoot) ? canonicalRulesPath : bundledRulesPath);
+  const sourcePath = policyReader.POLICY_PATH;
+  if (expected?.path && expected.path !== sourcePath) {
+    throw new Error("Editorial rules changed location; start a new rules review.");
+  }
   const loadedRules = policyReader.loadEditorialRules(sourcePath, expected?.sha256);
   return { ...loadedRules, version: loadedRules.policy.version };
 }
