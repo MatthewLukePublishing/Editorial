@@ -12,6 +12,8 @@ reports, logs, credentials, and historical archives remain excluded.
 - Windows 10 or later.
 - PowerShell 7 (`pwsh`).
 - Node.js 24 LTS or later and npm.
+- The shared Book Standards installation at `../InDesign/Book Standards`, or
+  its directory supplied through `BOOK_STANDARDS_HOME`.
 - Git when running the distribution-safety test.
 - The official Codex CLI, authenticated with **Sign in with ChatGPT**, for translation stages.
 - Microsoft Excel is optional; the pipeline reads and writes XLSX through Node.js libraries.
@@ -125,18 +127,19 @@ Read the stage README files before preparing data or launching an Adobe applicat
 
 ## Editorial rules across the pipeline
 
-[Translation Rules.md](<Code/Translation Rules.md>) is the editable, versioned runtime policy for English,
+The shared `Book Standards.sqlite` database is the versioned runtime policy for English,
 French, German, Spanish, Portuguese, Dutch, Italian, Turkish, Polish and Swedish.
 It distinguishes the supplied house style from native-language adaptations and
-records its source references. It contains a complete, cell-addressed transcription
-of the supplied workbook, active Markdown rule instructions, and language metadata.
-Edit shared-rule prose or add a unique rule with the documented stage metadata;
-saved changes are read by prompts and invalidate stale job evidence. Language
-settings also feed the existing typography and layout checks. The original workbook
-is unchanged and is not needed at runtime. Typo Checker reads this same canonical
-file when the projects are installed side by side and includes an identical copy
-for standalone distribution. Keep both distributed rule files and their shared
-`EditorialPolicy.cjs` readers identical when maintaining the programs.
+records its source references. Book Standards also preserves all ten sheets of
+Publishing.xlsx, with cell coordinates, formulas and cached results.
+Edit active instructions in `editorial_rule` and language settings in
+`editorial_language`, following the Book Standards README. Saved changes
+invalidate stale job evidence. Language settings continue to feed typography
+and layout checks. Embedded source documents are immutable import evidence;
+production checklist text is never executed as workflow instructions.
+Typos and Translate both use the same database and shared `EditorialPolicy.cjs`
+reader. There is no bundled rule-file fallback. Standalone installations must
+set `BOOK_STANDARDS_HOME` before tests or runtime use.
 Protected source sections and book-specific terminology take precedence.
 
 - Glossary authoring: `Build_Glossary_Runtime.cjs --rules French` prints only the

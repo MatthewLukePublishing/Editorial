@@ -746,7 +746,7 @@ const manifestPath = path.join(jobDir, "job_manifest.json");
 const config = readJson(configPath, "job configuration");
 if (!pathsEqual(String(config.jobPath || ""), jobDir)) throw new Error("Job configuration path does not match --job.");
 if (config.editorialRules) {
-  if (!isStrictlyInside(config.editorialRules.path, jobDir) || sha256File(config.editorialRules.path) !== config.editorialRules.sha256 ||
+  if (!isStrictlyInside(config.editorialRules.path, jobDir) || sha256File(config.editorialRules.path) !== config.editorialRules.snapshotSha256 ||
       resolveEditorialRules(config.targetLanguage, "text").sha256 !== config.editorialRules.sha256) {
     throw new Error("Editorial policy snapshot or current policy changed; review cannot resume.");
   }

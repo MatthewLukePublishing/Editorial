@@ -23,7 +23,7 @@ export function prepareEditorialReview(requestedJobPath) {
   if(!pathsEqual(config.jobPath,jobPath)||config.jobId!==manifest.jobId) throw Error("Editorial review job identity mismatch.");
   const selected=editorialRules.resolveEditorialRules(config.targetLanguage,"text");
   if(config.baselineTranslation?.mode==="editorial_review" && config.editorialRules?.sha256===selected.sha256){
-    if(!isStrictlyInside(config.editorialRules.path,jobPath)||digest(fs.readFileSync(config.editorialRules.path))!==selected.sha256) throw Error("Editorial policy snapshot changed; resume blocked.");
+    if(!isStrictlyInside(config.editorialRules.path,jobPath)||digest(fs.readFileSync(config.editorialRules.path))!==config.editorialRules.snapshotSha256) throw Error("Editorial policy snapshot changed; resume blocked.");
     if(!isStrictlyInside(config.baselineTranslation.workbookPath,jobPath)||
        digest(fs.readFileSync(config.baselineTranslation.workbookPath))!==config.baselineTranslation.workbookSha256){
       throw Error("Editorial baseline changed; resume blocked.");
@@ -52,13 +52,14 @@ export function prepareEditorialReview(requestedJobPath) {
     if(expected.size) throw Error("Missing previous ICML paths.");
   }
   const baselinePath=path.join(jobPath,"input","editorial_baseline.xlsx");
-  const policyPath=path.join(jobPath,"input","editorial_rules.md");
-  const policyBytes=fs.readFileSync(new URL("../../Code/Translation%20Rules.md",import.meta.url));
-  if(digest(policyBytes)!==selected.sha256) throw Error("Editorial policy changed during preparation.");
+  const policyPath=path.join(jobPath,"input","editorial_rules.json");
+  const current=editorialRules.loadEditorialRules();
+  if(current.sha256!==selected.sha256) throw Error("Editorial policy changed during preparation.");
+  const policyBytes=json(current.policy);
   const before={config,manifest};
   const nextConfig=structuredClone(config);
   nextConfig.baselineTranslation={mode:"editorial_review",workbookPath:baselinePath,workbookSha256:digest(outputBytes)};
-  nextConfig.editorialRules={version:selected.version,sha256:selected.sha256,path:policyPath};
+  nextConfig.editorialRules={version:selected.version,sha256:selected.sha256,path:policyPath,snapshotSha256:digest(policyBytes),databasePath:current.path};
   nextConfig.subscriptionStateName=`codex_editorial_${selected.sha256.slice(0,12)}_${digest(outputBytes).slice(0,12)}`;
   const nextManifest=structuredClone(manifest);
   if(manifest.import){

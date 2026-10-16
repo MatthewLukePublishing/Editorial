@@ -1,8 +1,7 @@
 "use strict";
 
-const path = require("node:path");
 const policyReader = require("./EditorialPolicy.cjs");
-const POLICY_PATH = path.join(__dirname, "Translation Rules.md");
+const POLICY_PATH = policyReader.POLICY_PATH;
 const { LANGUAGES, STAGES } = policyReader;
 function loadEditorialRules() { return policyReader.loadEditorialRules(POLICY_PATH); }
 function resolveEditorialRules(language, stage) { return policyReader.resolveEditorialRules(POLICY_PATH, language, stage); }
