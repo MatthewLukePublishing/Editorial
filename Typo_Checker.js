@@ -100850,7 +100850,7 @@ import { resolveLatestSubscriptionModel as resolveFreshLatestSubscriptionModel }
 import { proofreadingRules, typoRuleEvidence } from "./Translation_Rules.js";
 var SCRIPT_DIRECTORY = path.dirname(path.resolve(process.argv[1] || "."));
 var ACTIVE_JOB_CONFIG_PATH = path.resolve(
-  process.env.ACTIVE_JOB_CONFIG_PATH || "D:\\Google Drive\\Publishing\\Code\\Programs\\Translate\\02 Translate Text\\Active Job.json"
+  process.env.ACTIVE_JOB_CONFIG_PATH || path.join(SCRIPT_DIRECTORY, "../Translate/02 Translate Text/Active Job.json")
 );
 var EXPLICIT_INPUT_XLSX = String(process.env.INPUT_XLSX || "").trim();
 var REUSE_EXPORT_JOB_PATH = String(process.env.REUSE_EXPORT_JOB_PATH || "").trim();

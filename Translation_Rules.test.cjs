@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const reader = require("./EditorialPolicy.cjs");
 const RULE_PATH = reader.POLICY_PATH;
-const standards = require(path.join(path.dirname(RULE_PATH), "BookStandards.cjs"));
+const standards = require(path.join(path.dirname(RULE_PATH), "../Book Standards/BookStandards.cjs"));
 const markdown = standards.sourceDocument("Translation Rules.md").toString("utf8");
 function compressionDigest(value) {
   const sorted = item => Array.isArray(item) ? item.map(sorted) :

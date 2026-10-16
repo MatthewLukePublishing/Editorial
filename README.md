@@ -33,7 +33,7 @@ the account cannot use it, or `xhigh` is unavailable, no model query is sent.
 - Windows 10 or Windows 11
 - Node.js 24 or newer
 - The shared Book Standards installation, configured with `BOOK_STANDARDS_HOME`
-  when it is not at `../InDesign/Book Standards`.
+  when it is not at `../Book Standards`.
 - Adobe InDesign 2026 for the open-document workflow
 - The official [Codex CLI](https://learn.chatgpt.com/docs/codex/cli), signed in with
   **Sign in with ChatGPT**
@@ -265,7 +265,7 @@ must be reported; it must not be described as published.
 - Archive boundary: `None`
 
 The maintained source folder is
-`D:\Google Drive\Publishing\Code\Programs\Typos`. After source, documentation,
+`D:\Google Drive\Publishing\Code\Databases\Editorial\Typos`. After source, documentation,
 or project-organization changes, run the publishing-code consolidation process.
 
 ## Authentication contract
