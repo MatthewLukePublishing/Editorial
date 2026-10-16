@@ -32,9 +32,9 @@ $ErrorActionPreference = 'Stop'
 $maxBatchesSpecified = $PSBoundParameters.ContainsKey('MaxBatches')
 $programRoot = $PSScriptRoot
 $bookStandardsHome = if ($env:BOOK_STANDARDS_HOME) { [IO.Path]::GetFullPath($env:BOOK_STANDARDS_HOME) } else {
-    [IO.Path]::GetFullPath((Join-Path $programRoot '..\InDesign\Book Standards'))
+    [IO.Path]::GetFullPath((Join-Path $programRoot '..\Book Standards'))
 }
-$editorialDatabasePath = Join-Path $bookStandardsHome 'Book Standards.sqlite'
+$editorialDatabasePath = [IO.Path]::GetFullPath((Join-Path $bookStandardsHome '..\data\Book Standards.sqlite'))
 $stageTwoRoot = Join-Path $programRoot '02 Translate Text'
 $jobsRoot = Join-Path $stageTwoRoot 'Jobs'
 $activeJobPath = Join-Path $stageTwoRoot 'Active Job.json'
@@ -904,6 +904,9 @@ function Show-Status {
 }
 
 function Move-TranslationJobToArchive {
+    if ((Split-Path -Leaf (Split-Path -Parent $programRoot)) -eq 'Editorial') {
+        throw 'Editorial does not retain job archives. Keep current evidence with its job or reconcile it with the product before cleanup.'
+    }
     $active = Read-JsonFile -Path $activeJobPath -Label 'active-job configuration'
     $source = Assert-PathWithin -Path ([string]$active.jobPath) -Parent $jobsRoot -Label 'Archive source'
     $safeBook = ConvertTo-SafePathPart ([string]$active.book)

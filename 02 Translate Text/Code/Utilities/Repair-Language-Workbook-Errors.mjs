@@ -25,7 +25,7 @@ function parseArgs(argv) {
   const result = {
     apply: false,
     root: path.join(STAGE_TWO_ROOT, "Language Files"),
-    archive: path.join(WORKFLOW_ROOT, "_Archive", "2026-09-01 Language Workbook Formula Recovery"),
+    archive: null,
   };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
@@ -201,6 +201,10 @@ for (const plan of plans) {
 }
 console.log(`REPAIR_SUMMARY|mode=${cli.apply ? "apply" : "check"}|files=${plans.length}|cells=${totalChanges}`);
 if (!cli.apply || !plans.length) process.exit(0);
+if (!cli.archive) throw new Error("Supply --archive with a reviewed product-owned recovery directory; Editorial does not retain archives.");
+if (path.relative(path.resolve(WORKFLOW_ROOT, ".."), cli.archive).split(path.sep)[0] !== "..") {
+  throw new Error("Recovery copies must be outside Editorial, in the owning product directory.");
+}
 if (fs.existsSync(cli.archive)) throw new Error(`Archive destination already exists: ${cli.archive}`);
 
 fs.mkdirSync(cli.archive, { recursive: true });

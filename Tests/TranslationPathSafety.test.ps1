@@ -24,6 +24,10 @@ try {
     $derived = Resolve-TranslationProductsRoot -ProgramRoot $programRoot
     Assert-Equal $derived ([IO.Path]::GetFullPath($derivedProducts)) 'Products root was not derived from the canonical sibling layout.'
 
+    $editorialProgramRoot = Join-Path $publishingRoot 'Code\Databases\Editorial\Translate'
+    $editorialProducts = Resolve-TranslationProductsRoot -ProgramRoot $editorialProgramRoot
+    Assert-Equal $editorialProducts ([IO.Path]::GetFullPath($derivedProducts)) 'Editorial relocation changed the Products root.'
+
     [Environment]::SetEnvironmentVariable('TRANSLATION_PRODUCTS_ROOT', $explicitProducts)
     $fromEnvironment = Resolve-TranslationProductsRoot -ProgramRoot $programRoot
     Assert-Equal $fromEnvironment ([IO.Path]::GetFullPath($explicitProducts)) 'Products root did not honor TRANSLATION_PRODUCTS_ROOT.'
@@ -33,7 +37,7 @@ try {
     catch { $missingRejected = $_.Exception.Message -match 'does not exist' }
     if (-not $missingRejected) { throw 'A missing explicit Products root was not rejected.' }
 
-    Write-Output 'TRANSLATION_PATH_SAFETY_TEST_OK|cases=3'
+    Write-Output 'TRANSLATION_PATH_SAFETY_TEST_OK|cases=4'
 } finally {
     [Environment]::SetEnvironmentVariable('TRANSLATION_PRODUCTS_ROOT', $priorEnvironmentValue)
     if (Test-Path -LiteralPath $temporaryRoot) { Remove-Item -LiteralPath $temporaryRoot -Recurse -Force }

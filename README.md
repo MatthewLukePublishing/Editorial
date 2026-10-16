@@ -12,7 +12,7 @@ reports, logs, credentials, and historical archives remain excluded.
 - Windows 10 or later.
 - PowerShell 7 (`pwsh`).
 - Node.js 24 LTS or later and npm.
-- The shared Book Standards installation at `../InDesign/Book Standards`, or
+- The shared Book Standards installation at `../Book Standards`, or
   its directory supplied through `BOOK_STANDARDS_HOME`.
 - Git when running the distribution-safety test.
 - The official Codex CLI, authenticated with **Sign in with ChatGPT**, for translation stages.
@@ -301,9 +301,12 @@ one.
 - Current production and ad hoc job records: `02 Translate Text\Jobs\<book>\<language>\<job-id>`.
 - Legacy production job records: `<Book>\Interiors\<Edition>\Translation Job` (still supported).
 - Active-job pointer: `02 Translate Text\Active Job.json` (generated; one at a time).
-- Archive boundary: `_Archive`
+- Archive boundary: `None`
 
-The archive is local only and is never published.
+Editorial does not retain archives. The Archive action is disabled in this
+installation; retain current job evidence in place until product-level
+reconciliation. The workbook repair utility requires an explicit product-owned
+recovery destination. No production files are published to GitHub.
 
 ## Authentication contract
 

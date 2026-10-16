@@ -17,10 +17,10 @@ param(
 $ErrorActionPreference = 'Stop'
 $javaScriptLanguage = 1246973031
 $programRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
-$codeRoot = Split-Path -Parent (Split-Path -Parent $programRoot)
+$codeRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $programRoot))
 $templatePath = Join-Path $PSScriptRoot 'Run_Translation_Document.jsx'
-$exportScriptPath = Join-Path $codeRoot 'Programs\InDesign Scripts\Adobe InDesign 2026\Scripts\Community\Scripts Panel\Translation\Export All Content to Excel.jsx'
-$importScriptPath = Join-Path $codeRoot 'Programs\InDesign Scripts\Adobe InDesign 2026\Scripts\Community\Scripts Panel\Translation\Import All Content from Excel.jsx'
+$exportScriptPath = Join-Path $codeRoot 'Programs\InDesign\InDesign Scripts\Adobe InDesign 2026\Scripts\Community\Scripts Panel\Translation\Export All Content to Excel.jsx'
+$importScriptPath = Join-Path $codeRoot 'Programs\InDesign\InDesign Scripts\Adobe InDesign 2026\Scripts\Community\Scripts Panel\Translation\Import All Content from Excel.jsx'
 $commonAutomationPath = Join-Path $PSScriptRoot 'InDesignAutomationCommon.ps1'
 if (-not (Test-Path -LiteralPath $commonAutomationPath -PathType Leaf)) { throw "Missing InDesign automation utility: $commonAutomationPath" }
 . $commonAutomationPath

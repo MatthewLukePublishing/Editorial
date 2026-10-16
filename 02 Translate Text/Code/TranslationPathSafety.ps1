@@ -23,6 +23,9 @@ function Resolve-TranslationProductsRoot {
     if (-not $candidate) {
         $programsRoot = Split-Path -Parent ([IO.Path]::GetFullPath($ProgramRoot))
         $codeRoot = Split-Path -Parent $programsRoot
+        if ((Split-Path -Leaf $programsRoot) -eq 'Editorial' -and (Split-Path -Leaf $codeRoot) -eq 'Databases') {
+            $codeRoot = Split-Path -Parent $codeRoot
+        }
         $publishingRoot = Split-Path -Parent $codeRoot
         $candidate = Join-Path $publishingRoot 'Products'
     }
