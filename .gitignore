@@ -1,29 +1,14 @@
+/data/*
+!/data/Book Standards.sqlite
+**/__pycache__/
+**/PROJECT.md
 node_modules/
-
-# Review inputs, outputs, and job evidence
-*.xlsx
-*.xlsm
-*.xls
-*.job.json
-typo_checks/
-
-# Local configuration and credentials
 .env
 .env.*
-!.env.example
 *.pem
 *.key
-
-# Local project governance
-/PROJECT.md
-
-# Temporary and editor files
-.tmp/
 *.log
 *.tmp
-*.temp
-~$*
-.DS_Store
-Thumbs.db
-.vscode/
-.idea/
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm

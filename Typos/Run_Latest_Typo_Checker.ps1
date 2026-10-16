@@ -9,7 +9,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$Repository = 'MatthewLukePublishing/typo-checker'
+$Repository = 'MatthewLukePublishing/editorial'
 $GitHubApiBase = "https://api.github.com/repos/$Repository"
 $WorkspacePrefix = 'matthew-luke-typo-checker-'
 $RequiredFiles = @(
@@ -40,6 +40,27 @@ function Assert-Language {
         $Value -notmatch '^[\p{L}\p{M}][\p{L}\p{M}0-9 .()_-]*$') {
         throw "Language must be a plain language name of 1-80 characters, such as 'German'."
     }
+}
+
+function Get-EditorialComponentRoot {
+    param([Parameter(Mandatory)] [string]$Root, [Parameter(Mandatory)] [string]$Tag)
+    Assert-ReleaseTag -Value $Tag
+    foreach ($relativePath in @('package.json', 'Book Standards/BookStandards.cjs', 'Book Standards/EditorialPolicy.cjs', 'data/Book Standards.sqlite')) {
+        if (-not (Test-Path -LiteralPath (Join-Path $Root $relativePath) -PathType Leaf)) {
+            throw "The Editorial release is incomplete; missing '$relativePath'."
+        }
+    }
+    $package = Get-Content -LiteralPath (Join-Path $Root 'package.json') -Raw | ConvertFrom-Json
+    if ($package.name -ne '@matthew-luke-publishing/editorial' -or [string]$package.version -ne $Tag.Substring(1)) {
+        throw "Editorial release tag '$Tag' does not match the root package identity/version."
+    }
+    $componentRoot = Join-Path $Root 'Typos'
+    foreach ($relativePath in $RequiredFiles) {
+        if (-not (Test-Path -LiteralPath (Join-Path $componentRoot $relativePath) -PathType Leaf)) {
+            throw "The Editorial release is incomplete; missing 'Typos/$relativePath'."
+        }
+    }
+    return $componentRoot
 }
 
 function New-GitHubApiUri {
@@ -135,7 +156,13 @@ function Remove-SafeWorkspace {
     param([Parameter(Mandatory)] [string]$Path)
     $resolved = Assert-SafeWorkspacePath -Path $Path
     if ([IO.Directory]::Exists($resolved)) {
-        [IO.Directory]::Delete($resolved, $true)
+        if ((Get-Item -LiteralPath $resolved).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw 'Refusing a redirected temporary workspace.'
+        }
+        Add-Type -AssemblyName Microsoft.VisualBasic
+        [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory($resolved,
+            [Microsoft.VisualBasic.FileIO.UIOption]::OnlyErrorDialogs,
+            [Microsoft.VisualBasic.FileIO.RecycleOption]::SendToRecycleBin)
     }
 }
 
@@ -181,6 +208,13 @@ function Invoke-OfflineSelfTest {
         Assert-Language -Value 'German'
         Assert-CommitSha -Value ('a' * 40)
         Assert-ReleaseTag -Value 'v1.1.0'
+        $editorialRoot = Split-Path -Parent $PSScriptRoot
+        $editorialPackage = Get-Content -LiteralPath (Join-Path $editorialRoot 'package.json') -Raw | ConvertFrom-Json
+        $componentRoot = Get-EditorialComponentRoot -Root $editorialRoot -Tag "v$($editorialPackage.version)"
+        if ($componentRoot -ne $PSScriptRoot) { throw 'Editorial component layout self-test failed.' }
+        $rejected = $false
+        try { [void](Get-EditorialComponentRoot -Root $editorialRoot -Tag 'v999.0.0') } catch { $rejected = $true }
+        if (-not $rejected) { throw 'Editorial release-version rejection self-test failed.' }
         $archiveUri = Get-ArchiveUri -CommitSha ('b' * 40)
         if ($archiveUri.Host -ne 'github.com') { throw 'Archive host validation self-test failed.' }
         if ((New-GitHubApiUri -RelativePath '/releases/latest').Host -ne 'api.github.com') {
@@ -243,6 +277,7 @@ $environmentNames = @(
     'OUTPUT_XLSX',
     'SHEET_NAME',
     'ROW_LIMIT'
+    'BOOK_STANDARDS_HOME'
 )
 
 try {
@@ -267,19 +302,11 @@ try {
     if ($roots.Count -ne 1 -or $topLevelFiles.Count -ne 0) {
         throw 'The GitHub release archive did not contain exactly one project root.'
     }
-    $sourceRoot = $roots[0].FullName
-    foreach ($relativePath in $RequiredFiles) {
-        $requiredPath = Join-Path $sourceRoot $relativePath
-        if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
-            throw "The latest release is incomplete; missing '$relativePath'."
-        }
-    }
-    $package = Get-Content -LiteralPath (Join-Path $sourceRoot 'package.json') -Raw | ConvertFrom-Json
-    if ([string]$package.version -ne $resolution.Tag.Substring(1)) {
-        throw "Release tag '$($resolution.Tag)' does not match package version '$($package.version)'."
-    }
+    $editorialRoot = $roots[0].FullName
+    $sourceRoot = Get-EditorialComponentRoot -Root $editorialRoot -Tag $resolution.Tag
     $node = Get-NodeExecutable
     $savedEnvironment = Save-ProcessEnvironment -Names $environmentNames
+    [Environment]::SetEnvironmentVariable('BOOK_STANDARDS_HOME', (Join-Path $editorialRoot 'Book Standards'), 'Process')
     [Environment]::SetEnvironmentVariable('OPEN_INDESIGN_DOCUMENT', 'true', 'Process')
     [Environment]::SetEnvironmentVariable('USE_OPEN_INDESIGN_DOCUMENT', 'true', 'Process')
     [Environment]::SetEnvironmentVariable('CHECK_LANGUAGE', $Language.Trim(), 'Process')

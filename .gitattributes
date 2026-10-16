@@ -1,7 +1,1 @@
-* text=auto eol=lf
-
-# The checker verifies this exporter byte for byte. Git must never rewrite it.
-*.jsx -text
-
-# Verbatim workbook transcription retains its original trailing spaces.
-"Translation Rules.md" whitespace=-blank-at-eol
+*.sqlite binary

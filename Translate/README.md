@@ -1,0 +1,326 @@
+# Translation Pipeline
+
+Translation Pipeline is a Windows-oriented publishing workflow for glossary maintenance, ICML text translation, Illustrator diagram text, and spreadsheet-based comic captions. It treats each translation as an auditable job, validates content identifiers and workbook integrity, and uses recoverable transactions when several related files must change together.
+
+The repository contains source code, synthetic examples, offline tests, and the
+owner-approved FPST diagram ledger and MFP/FPST glossary snapshot. Other books,
+translations, glossary workbooks, Adobe files, production outputs, job records,
+reports, logs, credentials, and historical archives remain excluded.
+
+## Requirements
+
+- Windows 10 or later.
+- PowerShell 7 (`pwsh`).
+- Node.js 24 LTS or later and npm.
+- The shared Book Standards installation at `../Book Standards`, or
+  its directory supplied through `BOOK_STANDARDS_HOME`.
+- Git when running the distribution-safety test.
+- The official Codex CLI, authenticated with **Sign in with ChatGPT**, for translation stages.
+- Microsoft Excel is optional; the pipeline reads and writes XLSX through Node.js libraries.
+- Adobe InDesign for source export, link refresh and final layout operations.
+  ICML import and spacing rules run offline without Adobe.
+- Adobe Illustrator for diagram translation.
+
+The offline test suite does not require Codex, credentials, network access, Microsoft Office, InDesign, or Illustrator.
+
+## Install
+
+Clone the repository and install the exact locked dependencies:
+
+```powershell
+git clone https://github.com/MatthewLukePublishing/editorial.git
+Set-Location .\editorial\Translate
+npm ci --ignore-scripts
+npm test
+```
+
+`npm test` syntax-checks the maintained Node.js and PowerShell source and runs synthetic regression, transaction-recovery, path-safety, and public-distribution tests. It never launches Adobe applications or calls a model.
+
+## Configure inputs
+
+Except for the explicitly published ledger and glossary snapshot, real inputs
+are local and ignored by Git. Start with the files under `examples`:
+
+1. Copy `examples/book_glossary_map.example.json` to `01 Translate Glossaries/book_glossary_map.json` and replace the `DEMO` paths with your own book resources.
+2. Create `01 Translate Glossaries/<family>/Glossary.xlsx` with `Acronyms` and `Words` worksheets. Each begins with `English`, `English Definition`, and paired term/definition columns for every target language.
+3. Put the generated `acronyms.json` and `words.json` under the family’s `Runtime` folder. Synthetic JSON shapes are included in `examples`.
+4. Put the source four-column workbook, ICML ZIP, and optional standard INDD under `02 Translate Text/Origin Files`.
+5. If the book needs mandatory terminology rules, copy `examples/book_translation_instructions.example.json` to `02 Translate Text/Book Instructions/<BOOK>.json` and reference it from the map.
+6. Set each book’s product paths in the map. You can also pass `-ProductsRoot` to the launcher or set `TRANSLATION_PRODUCTS_ROOT`.
+
+For MFP or FPST, `examples/book_glossary_map.published.json` can build the supplied
+glossaries without a private workbook or Google sign-in. Run the Stage 1 builder
+with `--map examples/book_glossary_map.published.json`, or merge its
+`publishedSource` and `runtime.contextual` settings into an existing local map.
+Keep existing base workbooks and other profiles. The published MFP French terms
+use **French Recommended**. See the [Stage 1 guide](01%20Translate%20Glossaries/README.md)
+for profile bindings, source precedence and refreshing the snapshot. It is not a
+live-sync connection; existing translation jobs remain pinned to their inputs.
+
+The four text-workbook headers are:
+
+```text
+ParagraphStyleRange id
+ParagraphStyleRange content
+Content tag
+Content content
+```
+
+Columns A and C are protected identifiers. Do not renumber or edit them in a translated workbook.
+
+## Usage
+
+Run commands from the `Translate` component directory. A normal text job follows this sequence:
+
+```powershell
+& '.\Run-Translation-Job.ps1' -Action Prepare -Book DEMO -Language French -EditionName 'French' -GlossaryProfile 'French'
+& '.\Run-Translation-Job.ps1' -Action Translate
+& '.\Run-Translation-Job.ps1' -Action Import
+& '.\Run-Translation-Job.ps1' -Action Finalize
+& '.\Run-Translation-Job.ps1' -Action Complete
+```
+
+Use `-Action Status` at any time. If Adobe relinking was deferred because an InDesign document was open, save and close it, then use `-Action Export` before continuing. Use `-Action Validate` after an authorized workbook correction. `Deactivate` and `Activate` switch the single active-job pointer without moving a self-contained edition.
+
+For an unattended run with no visible PowerShell worker window:
+
+```powershell
+$run = & '.\Run-Translation-Job.ps1' -Action Translate -Background
+Get-Content -LiteralPath $run.StdoutPath -Encoding UTF8 -Tail 20
+Get-Content -LiteralPath $run.StatusPath -Encoding UTF8 -Raw
+```
+
+`-Background` returns immediately with `ProcessId`, `StdoutPath`,
+`StderrPath` and `StatusPath`. UTF-8 logs and a completion-status file are
+kept under `02 Translate Text/Jobs/Launcher Runs`. Status changes from
+`Running` to `Succeeded` or `Failed`, with the worker exit code.
+Wait for the worker and check the job's status before importing, finalizing,
+changing the active job or starting another Adobe operation. A deliberately
+paused batch can finish its worker successfully while the translation remains
+incomplete; its log records `TRANSLATION_PAUSED`. Omit `-Background` for the
+synchronous sequence above or when troubleshooting.
+
+Other stages:
+
+```powershell
+# Build or check runtime glossaries
+node '.\01 Translate Glossaries\Code\Shared\Build_Glossary_Runtime.cjs'
+node '.\01 Translate Glossaries\Code\Shared\Build_Glossary_Runtime.cjs' --check
+
+# Translate Illustrator diagrams (interactive). With no source flag the
+# controller asks whether to reuse the recorded ledger or extract the text
+# from the artwork; it offers no default.
+node '.\03 Translate Diagrams\Code\Illustrator_Translate_Diagrams_Batch.cjs'
+
+# Choose the source instead of answering the prompt. --ledger reuses the book's
+# recorded ledger: no text export, one Illustrator session, and only pending text
+# is translated, in bounded multi-diagram requests before Illustrator starts.
+# --extract exports the text from the artwork, one request per diagram.
+node '.\03 Translate Diagrams\Code\Illustrator_Translate_Diagrams_Batch.cjs' --ledger
+node '.\03 Translate Diagrams\Code\Illustrator_Translate_Diagrams_Batch.cjs' --extract
+
+# Translate the configured comic-caption workbook
+node '.\04 Translate Comic Captions\Code\Translate_Comic_Captions.js'
+```
+
+Read the stage README files before preparing data or launching an Adobe application.
+
+## Editorial rules across the pipeline
+
+The shared `Book Standards.sqlite` database is the versioned runtime policy for English,
+French, German, Spanish, Portuguese, Dutch, Italian, Turkish, Polish and Swedish.
+It distinguishes the supplied house style from native-language adaptations and
+records its source references. Book Standards also preserves all ten sheets of
+Publishing.xlsx, with cell coordinates, formulas and cached results.
+Edit active instructions in `editorial_rule` and language settings in
+`editorial_language`, following the Book Standards README. Saved changes
+invalidate stale job evidence. Language settings continue to feed typography
+and layout checks. Embedded source documents are immutable import evidence;
+production checklist text is never executed as workflow instructions.
+Typos and Translate both use the same database and shared `EditorialPolicy.cjs`
+reader. There is no bundled rule-file fallback. Standalone installations must
+set `BOOK_STANDARDS_HOME` before tests or runtime use.
+Protected source sections and book-specific terminology take precedence.
+
+- Glossary authoring: `Build_Glossary_Runtime.cjs --rules French` prints only the
+  applicable glossary guidance. Building runtime JSON never restyles approved terms.
+- Text, diagrams and captions: prompts receive their own stage's rules and a policy
+  hash. A diagram request carries those rules once for every diagram in its batch
+  while each diagram keeps its own context. Exact case-sensitive glossary labels
+  are applied locally when the target is unambiguous, and the Illustrator worker
+  preflights replacement ranges and writes each changed frame once. Text/caption
+  postprocessing normalizes applicable date and symbol spacing; text QA checks
+  mechanical typography outside protected source and glossary locks.
+- ICML import: the workbook must have passed QA under the current policy. The
+  recoverable import changes matching Content IDs, then runs every applicable
+  spacing formula directly on ICML text before writing the files. Adjacent style
+  segments are handled together; XML, IDs, formatting, credits and panel-generated
+  references remain protected. The report records this spacing-only derivation
+  from the approved workbook and binds it to the exact resulting ICML hashes.
+- InDesign finalization: checks layer order and body-indent styles and emits exact
+  encoded definitions for the **Cross-References panel > Define Cross-Reference
+  Formats > Definition** editor. All language-specific cross-reference changes
+  must use that panel encoder, never scripted building-block edits or flattened
+  reference text. Update only the indicated references using the panel, then save
+  and close the document. The finalizer verifies the result read-only.
+  Formats used exclusively by protected paragraphs
+  remain unchanged. Mixed protected/unprotected formats require explicit review.
+- Offline GREP: translation postprocessing runs the shared and target-language
+  expressions before workbook export; import handles context across style runs.
+  Finalize and Complete verify the exact imported ICML set without invoking the
+  InDesign GREP interface. Every applicable expression, including zero matches,
+  and every language exclusion is recorded. See the
+  [text-stage guide](02%20Translate%20Text/README.md#editorial-rules-and-finishing-order).
+
+Apply revised rules to an already accepted translation with the appropriate job
+active:
+
+```powershell
+& '.\Run-Translation-Job.ps1' -Action ReviewRules -MaxBatches 1
+& '.\Run-Translation-Job.ps1' -Action Translate
+& '.\Run-Translation-Job.ps1' -Action Import
+& '.\Run-Translation-Job.ps1' -Action Finalize
+& '.\Run-Translation-Job.ps1' -Action Complete
+```
+
+`ReviewRules` transactionally snapshots the accepted workbook and policy and retains
+the previous ICML import evidence. It reviews every eligible group against that
+baseline; protected groups remain unchanged. It does not itself overwrite ICML or
+InDesign output. QA, import, layout and completion are bound to the current policy.
+
+Mechanical QA is not proof of idiom, meaning or section-wide acronym usage: those
+remain linguistic-review responsibilities. Caption placement/stacking and TOC
+numbering instructions apply when those objects are inserted, reordered or rebuilt;
+translation does not reorder existing artwork or rebuild a TOC automatically.
+Preserved style ranges retain bold emphasis and italic variables. The final layout
+report identifies the automated checks separately from this retained workflow guidance.
+
+### Spanish editorial coverage
+
+Policy 1.1.0 incorporates generalized Spanish review corrections for every book,
+not page-specific replacements. Stage-filtered Spanish rules cover `Imagen` labels
+and translated running/chapter headings, full U.S. state names in narrative
+captions, consistent first-level guillemets with nesting exceptions, superscript
+ordinal endings (`1.ᵉʳ`, `3.ᵉʳ`), lowercase common terms, sentence spacing and
+sentence-final periods after closing parentheses. Four-digit quantities stay
+ungrouped; five or more digits use nonbreaking space groups. Source-aware review
+distinguishes decimal commas from English thousands separators; there is no
+blanket numeric, abbreviation, capitalization or punctuation replacement.
+The numeric and ordinal guidance references FundéuRAE in the policy source list.
+
+Existing full-month dates, metric-first measurements, NBSP before `%`, and
+panel-encoded `Ver` references remain authoritative. Spanish text postprocessing
+now also expands abbreviated dates without `de` (such as `26 feb 2026`) before
+workbook export, and QA rejects that unnormalized form. Language-specific
+instructions reach primary translation and targeted rechecks through the same
+prompt builder; heading coverage is also retained in layout-review guidance.
+Contextual language rules are review instructions, not deterministic QA claims.
+The ICML GREP pass remains spacing-only and never rewrites generated references.
+
+Protected credits, approved glossary strings and official designations remain
+unchanged. Missing source headings or a conflict with protected content require
+scoped review. New jobs use the revised policy; existing jobs cannot silently
+reuse stale policy evidence. Updating the program alone does not rewrite any
+accepted workbook, ICML or InDesign file. Stage 4 remains Portuguese-only; its
+target-language scope has not been expanded by these Spanish rules.
+
+Before a panel edit, retain one verified INDD recovery copy in the private job
+state. Do not discard unsaved Adobe work or delete recovery evidence during an
+interruption. Unknown layout styles/formats fail closed instead of being guessed.
+
+## Codex model and authentication policy
+
+Translation is restricted to the ChatGPT-authenticated Codex harness. The pipeline:
+
+- queries OpenAI's live `latestModelInfo.model` metadata to identify the official frontier, then queries the authenticated Codex service to verify access to that exact model and `xhigh` support;
+- records the exact resolved model in the job record;
+- repeats both live requests before every new model query, including retries and rechecks, and fails if the frontier changes;
+- requires independent `xhigh` reasoning for primary translation/review calls and rechecks;
+- requires `codex login status` to report ChatGPT sign-in;
+- removes API-key and alternate-endpoint variables from every model subprocess; and
+- has no active paid API provider, API-key fallback, alternate endpoint, or older-model fallback.
+
+No model is installed locally. The Codex CLI is the client for hosted model queries and ChatGPT sign-in. Model discovery never uses a bundled catalog, a local model cache, catalog priority, or a saved job's model as its authority. Every discovery request disables caching and rejects redirects.
+
+The official model authority is [OpenAI's live model guidance](https://developers.openai.com/api/docs/guides/latest-model). Availability comes from the same ChatGPT subscription discovery service used by the official Codex client. The resolver reads the existing Codex-managed ChatGPT session from its vendor-owned `auth.json` in memory; it never copies or logs credentials. Keyring-only sessions are not supported by this resolver and cause it to stop.
+
+If either live request, metadata validation, authentication, or `xhigh` support fails, the job stops before sending a query. A current frontier that is missing from the account's live catalog is a blocking failure, even if an older model is available. Job and query records include the exact model, resolution time, source URLs, client version, and metadata hashes; saved resolutions are evidence only and are never reused for model selection.
+
+## Outputs and recovery
+
+Production editions are self-contained beneath the configured book `Interiors` folder. Administrative job state is stored under `02 Translate Text/Jobs`; the current pointer is `02 Translate Text/Active Job.json`. Generated workbooks, reports, model state, diagram logs, and caption outputs remain local and are ignored by Git.
+
+Workspace preparation, glossary runtime publication, ICML import, caption completion, diagram publication, and job archival use recoverable transactions. File-set recovery checks the entire set's original and replacement hashes before changing anything. Conflicting edits, missing required backups, a live transaction owner, or older journals without hashes stop recovery and retain the evidence for manual reconciliation. Source packages and existing production editions are not overwritten merely because a new job is prepared.
+
+Keep input workbooks and job configuration closed to edits during translation. Text and caption publication refuse changed inputs/outputs rather than overwrite newer work. Readiness checks are read-only and refuse pending recovery journals. See [the code review](CODE_REVIEW.md) for the v1.3.1 corrections and validation limits.
+
+## Troubleshooting
+
+- **No glossary mapping:** create `01 Translate Glossaries/book_glossary_map.json` from the example and verify its relative paths and profile names.
+- **Products root rejected:** pass an absolute `-ProductsRoot`, set `TRANSLATION_PRODUCTS_ROOT`, or use the documented sibling `Products` layout.
+- **Codex login rejected:** run `codex login`, choose Sign in with ChatGPT, and confirm with `codex login status`. API-key authentication is intentionally refused.
+- **Frontier model changed:** restart the job so every query is based on one newly recorded model resolution. The pipeline will not silently continue across a frontier change.
+- **Frontier unavailable or live discovery failed:** check connectivity and the Codex ChatGPT sign-in. The current frontier must appear in the service's response for this account and client. Re-running discovery must succeed before translation can continue; the program will not substitute an older model or a cached list.
+- **Workbook fails QA:** keep columns A and C unchanged, remove formulas and Excel error cells, and rerun `-Action Validate`. A workbook changed after import must be reimported.
+- **Import is stale:** restore the exact QA-passed workbook and ICML snapshot, or validate and import the authorized new revision.
+- **Adobe step will not start:** save and close unrelated Adobe documents, confirm the configured document and asset paths, then retry the same action. Never run concurrent InDesign operations.
+- **Interrupted multi-file operation:** after the original process has stopped, rerun the same action. If recovery reports a conflict or a legacy journal, compare the retained originals, staged replacements and current files before explicitly choosing what to restore. Never delete the journal or backups to bypass the safety check.
+
+## Repository safety
+
+The `.gitignore` and public-distribution test reject credentials, personal workstation paths, private data folders, common publishing binaries, generated state, and oversized files. Before contributing, run `npm test` and inspect `git diff --cached` so that only maintained source or synthetic examples are proposed.
+
+## GitHub publication contract
+
+The canonical public repository is
+`https://github.com/MatthewLukePublishing/editorial`. After an
+authorized maintained source or documentation change—including every new
+executable or script—passes the relevant offline tests and Publishing
+consolidation, validate and commit the exact candidate locally. Do not push,
+tag, create a release, or otherwise publish to GitHub as an automatic
+completion step. Any GitHub action requires explicit per-action user
+authorization; if authorized, verify the resulting revision and CI.
+
+Never publish ignored inputs, generated translations, Adobe files, job records,
+credentials, authentication state, archives, or private production data. A
+failed validation or push must be reported; it must not be described as
+published.
+
+Diagram text ledgers under `03 Translate Diagrams/Ledgers/` are the single
+authorised exception, published at the owner's direction as the durable record
+of a book's diagram text. They are copyrighted content, not MIT-licensed source.
+See [DATA-LICENCE.md](DATA-LICENCE.md), and read
+[the ledger guide](03%20Translate%20Diagrams/Ledgers/README.md) before changing
+one.
+
+## Management contract
+
+- Primary entry point: `Run-Translation-Job.ps1`
+- Cross-stage code: `Code` (shared infrastructure only; stage-specific code remains with its stage).
+- Production outputs: `<Book>\Interiors\<Edition>` (isolated from the English source).
+- Current production and ad hoc job records: `02 Translate Text\Jobs\<book>\<language>\<job-id>`.
+- Legacy production job records: `<Book>\Interiors\<Edition>\Translation Job` (still supported).
+- Active-job pointer: `02 Translate Text\Active Job.json` (generated; one at a time).
+- Archive boundary: `None`
+
+Editorial does not retain archives. The Archive action is disabled in this
+installation; retain current job evidence in place until product-level
+reconciliation. The workbook repair utility requires an explicit product-owned
+recovery destination. No production files are published to GitHub.
+
+## Authentication contract
+
+This program must not store secrets or authentication state locally. All current and future credentials, `.env` files, DPAPI blobs, tokens, private keys, cookies, browser profiles, session state, and provider account contexts belong only in `D:\Google Drive\Publishing\Code\Admin\Access`. Code in this program may reference protected loaders or authenticated sessions from that directory but must never duplicate or print secret values.
+
+## Licence and content terms
+
+The pipeline source code, tests, and documentation are released under the
+[MIT License](LICENSE). You may download, clone, fork, and modify your own copy
+of the code.
+
+Published content is not. Diagram text ledgers, recorded book text, glossary
+terms, translations, and captions are (c) 2026 Matthew Luke Publishing, all
+rights reserved. The MIT License does not apply to them, their presence here
+grants no permission, and using, copying, redistributing, or translating them
+presumes permission was granted by the copyright holder. See
+[DATA-LICENCE.md](DATA-LICENCE.md).

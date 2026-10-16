@@ -1,0 +1,1902 @@
+#!/usr/bin/env node
+"use strict";
+
+/**
+ * Illustrator_Translate_Diagrams_Batch.cjs
+ *
+ * What it does
+ * 1. Requires a text-source choice, then prompts for a folder containing .ai files
+ * 2. In ledger mode, translates pending text in multi-diagram batches first
+ * 3. Launches Illustrator ONCE for the whole batch
+ * 4. A persistent controller JSX runs inside Illustrator
+ * 5. For each .ai file:
+ *    - controller invokes the worker JSX against that file
+ *    - Illustrator scans Open Sans / Source Code Pro runs and writes scan JSON
+ *    - Node supplies prepared translations (or queries scanned text in extraction mode)
+ *    - Node writes translation JSON
+ *    - Illustrator saves a separate staged file and closes its owned document
+ *    - Node publishes it transactionally if the original is unchanged
+ * 6. Any failure stops the batch without killing Illustrator or retrying a save
+ * 7. Staged output and diagnostics remain available for recovery
+ * 8. Failures are logged to a .txt file
+ */
+
+const fs = require("fs");
+const { prepareDiagramPublication, publishDiagram } = require("./DiagramPublication.cjs");
+const editorialRules = require("../../Code/TranslationEditorialRules.cjs");
+const path = require("path");
+const os = require("os");
+const crypto = require("crypto");
+const readline = require("readline");
+const { spawn, spawnSync } = require("child_process");
+const { buildLedgerGlossary, matchesTerm, ledgerScan, packDiagramScans, compactQuery, expandResponse } = require("./DiagramTranslationPlan.cjs");
+const { pathToFileURL } = require("url");
+const {
+  writeFileAtomicSync,
+  writeJsonAtomicSync,
+} = require("../../Code/AtomicFiles.cjs");
+const {
+  cleanText,
+  trimString,
+} = require("../../Code/TextNormalization.cjs");
+const { deleteStateFileIfExists } = require("../../Code/JsonStateStore.cjs");
+const {
+  buildAcronymSymbolsRuntime,
+  listAiFiles,
+  resolveDiagramGlossaryResources,
+} = require("./DiagramResources.cjs");
+const {
+  defaultLedgerPath,
+  hashFile,
+  indexByHash,
+  loadLedger,
+  matchDiagram,
+  recordTranslations,
+  translationsForLanguage,
+  unitsForWorker,
+  validateMatchReport,
+  writeLedger,
+} = require("./DiagramLedger.cjs");
+
+let MODEL = "";
+let TARGET_LANGUAGE = trimString(process.env.AI_TARGET_LANGUAGE || "");
+let EDITORIAL_POLICY = null;
+let BOOK = trimString(process.env.AI_BOOK || "");
+let GLOSSARY_PROFILE = trimString(process.env.AI_GLOSSARY_PROFILE || "");
+let GLOSSARY_RESOURCES = null;
+let SYMBOL_RUNTIME = null;
+let LEDGER = null;
+let LEDGER_PATH = "";
+let PREPARED_LEDGER_TRANSLATIONS = null;
+let RESOURCE_HASHES = null;
+const PERFORMANCE = { modelQueries: 0, promptCharacters: 0 };
+const REASONING_EFFORT = "xhigh";
+const MAX_SUBSCRIPTION_RETRIES = 3;
+const CODEX_QUERY_TIMEOUT_MS = 60 * 60 * 1000;
+const WAIT_TIMEOUT_MS = 10 * 60 * 1000;
+const WAIT_POLL_MS = 500;
+const STARTUP_TIMEOUT_MS = 30 * 1000;
+const CONTROLLER_READY_TIMEOUT_MS = 2 * 60 * 1000;
+const WORKER_TRANSLATION_WAIT_MS = (CODEX_QUERY_TIMEOUT_MS + 120000) * MAX_SUBSCRIPTION_RETRIES;
+
+// Prose families the scanner treats as ordinary translatable diagram text. Keep
+// these in step with the ledger's prose kinds in DiagramLedger.cjs.
+const OPEN_SANS_MATCHES = [
+  "open sans",
+  "opensans",
+  "open-sans",
+  "chakrapetch",
+  "league gothic",
+  "leaguegothic",
+  "alte din 1451 mittelschrift gepraegt",
+  "alte din 1451 mittelschrift geprægt"
+];
+
+const SOURCE_CODE_MATCHES = [
+  "source code pro",
+  "sourcecodepro",
+  "source-code-pro",
+  "source code",
+  "sourcecode",
+  "source-code"
+];
+
+const PROGRAM_ROOT = path.resolve(__dirname, "..", "..");
+const MODEL_RESOLVER = path.join(PROGRAM_ROOT, "02 Translate Text", "Code", "Resolve-LatestSubscriptionModel.mjs");
+const CODEX_CLI_JS = process.env.CODEX_CLI_JS || path.join(
+  process.env.APPDATA || "",
+  "npm", "node_modules", "@openai", "codex", "bin", "codex.js",
+);
+const CODEX_NODE_EXE = process.env.CODEX_NODE_EXE || process.execPath;
+let LEDGER_REQUESTED = false;
+function parseDiagramArguments(args) {
+  const options = { sourceMode: null, ledgerPath: "", checkOnly: false };
+  for (const argument of args) {
+    if (argument === "--check") {
+      options.checkOnly = true;
+      continue;
+    }
+    const isLedger = argument === "--ledger" || argument.startsWith("--ledger=");
+    if (!isLedger && argument !== "--extract") throw new Error(`Unknown argument: ${argument}`);
+    const mode = isLedger ? "ledger" : "extract";
+    if (options.sourceMode && options.sourceMode !== mode) {
+      throw new Error("Choose exactly one diagram text source: --ledger or --extract, not both.");
+    }
+    options.sourceMode = mode;
+    if (argument.startsWith("--ledger=")) {
+      const ledgerPath = argument.slice("--ledger=".length).trim();
+      if (!ledgerPath) throw new Error("--ledger=<path> requires a nonempty ledger path.");
+      if (options.ledgerPath && options.ledgerPath !== ledgerPath) {
+        throw new Error("Choose only one diagram ledger path.");
+      }
+      options.ledgerPath = ledgerPath;
+    }
+  }
+  return options;
+}
+
+async function chooseDiagramTextSource(options, {
+  interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY),
+  question = ask,
+  report = console.log,
+} = {}) {
+  if (options.sourceMode) return options.sourceMode;
+  if (options.checkOnly || !interactive) {
+    throw new Error("No diagram text source selected. Specify --ledger or --extract; neither is the default (also required with --check).");
+  }
+  while (true) {
+    const answer = (await question(
+      "Diagram text source (no default):\n" +
+      "  1. Reuse the recorded diagram text ledger\n" +
+      "  2. Extract text from the Illustrator artwork\n" +
+      "Choose 1 or 2 (q to cancel): "
+    )).trim().toLowerCase();
+    if (answer === "1" || answer === "ledger") return "ledger";
+    if (answer === "2" || answer === "extract") return "extract";
+    if (answer === "q") throw new Error("Diagram translation cancelled; no text source selected.");
+    report("Select 1 (ledger) or 2 (extract). Enter alone does not select either option.");
+  }
+}
+
+function ask(question, { input = process.stdin, output = process.stdout } = {}) {
+  const rl = readline.createInterface({ input, output });
+  return new Promise((resolve, reject) => {
+    const cancel = () => {
+      reject(new Error("Input closed or cancelled before an answer was supplied."));
+      rl.close();
+    };
+    rl.once("close", cancel);
+    rl.once("SIGINT", cancel);
+    rl.question(question, (answer) => {
+      rl.removeListener("close", cancel);
+      rl.removeListener("SIGINT", cancel);
+      rl.close();
+      resolve(answer.trim());
+    });
+  });
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+function normalizeToLF(text) {
+  return String(text ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
+function getLineBreakStyle(text) {
+  const s = String(text ?? "");
+  if (s.indexOf("\r\n") !== -1) return "\r\n";
+  if (s.indexOf("\r") !== -1) return "\r";
+  if (s.indexOf("\n") !== -1) return "\n";
+  return null;
+}
+
+function countLineBreaks(text) {
+  const s = String(text ?? "");
+  const matches = s.match(/\r\n|\r|\n/g);
+  return matches ? matches.length : 0;
+}
+
+function convertLineBreaks(text, targetStyle) {
+  const lf = normalizeToLF(text);
+  if (!targetStyle) return lf;
+  if (targetStyle === "\r\n") return lf.replace(/\n/g, "\r\n");
+  if (targetStyle === "\r") return lf.replace(/\n/g, "\r");
+  return lf;
+}
+
+function splitOuterWhitespace(text) {
+  const m = String(text).match(/^([\s]*)([\s\S]*?)([\s]*)$/);
+  return {
+    leading: m ? m[1] : "",
+    core: m ? m[2] : text,
+    trailing: m ? m[3] : "",
+  };
+}
+
+function shouldSkipTranslation(text) {
+  const t = cleanText(text).trim();
+  if (!t) return true;
+  if (/^[0-9\s.,:/\\()[\]{}+_\-–—]+$/.test(t)) return true;
+  return false;
+}
+
+function normalizeLookupKey(value) {
+  return trimString(value).toLowerCase();
+}
+
+function escapeRegExp(text) {
+  return String(text ?? "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function normalizeSmartPunctuation(text) {
+  return String(text ?? "")
+    .replace(/[\u2018\u2019\u201B\u2032]/g, "'")
+    .replace(/[\u201C\u201D\u2033]/g, "\"")
+    .replace(/[\u2010-\u2015]/g, "-");
+}
+
+function buildFlexibleTermPattern(term) {
+  const normalized = normalizeSmartPunctuation(term);
+  return [...normalized].map((ch) => {
+    if (ch === "'") return "['\u2018\u2019\u201B\u2032]";
+    if (ch === "\"") return "[\"\\u201C\\u201D\\u2033]";
+    return escapeRegExp(ch);
+  }).join("");
+}
+
+function buildBoundaryRegex(term) {
+  return new RegExp(
+    `(^|[^A-Za-z0-9_])(${buildFlexibleTermPattern(term)})(?=$|[^A-Za-z0-9_])`,
+    "giu"
+  );
+}
+
+function sortGlossaryEntriesForReplacement(entries) {
+  return [...entries].sort((a, b) => {
+    const aIsAcronym = (a?.kind || "word") === "acronym";
+    const bIsAcronym = (b?.kind || "word") === "acronym";
+    if (aIsAcronym !== bIsAcronym) return aIsAcronym ? -1 : 1;
+    return String(b?.source || "").length - String(a?.source || "").length;
+  });
+}
+
+function makeGlossaryPairKey(source, target) {
+  return `${normalizeLookupKey(source)}\n${normalizeLookupKey(target)}`;
+}
+
+function buildGlossaryIndex(glossary) {
+  const byPair = new Map();
+  const bySource = new Map();
+
+  for (const entry of glossary) {
+    const source = trimString(entry.source);
+    const target = trimString(entry.target);
+    if (!source || !target) continue;
+
+    const normalized = {
+      source,
+      target,
+      context: trimString(entry.context || ""),
+      kind: trimString(entry.kind || "word") || "word",
+    };
+
+    byPair.set(makeGlossaryPairKey(source, target), normalized);
+    if (!bySource.has(normalizeLookupKey(source))) {
+      bySource.set(normalizeLookupKey(source), normalized);
+    }
+  }
+
+  return { byPair, bySource };
+}
+
+function enrichGlossaryMatches(glossaryMatches, glossaryIndex) {
+  const matches = Array.isArray(glossaryMatches) ? glossaryMatches : [];
+
+  return uniqueBy(
+    matches
+      .map((match) => {
+        const source = trimString(match.source);
+        const target = trimString(match.target);
+        if (!source || !target) return null;
+
+        const enriched =
+          glossaryIndex.byPair.get(makeGlossaryPairKey(source, target)) ||
+          glossaryIndex.bySource.get(normalizeLookupKey(source)) ||
+          null;
+
+        return {
+          source,
+          target,
+          context: enriched ? enriched.context : "",
+          kind: enriched ? enriched.kind : "word",
+        };
+      })
+      .filter(Boolean),
+    (entry) => `${entry.source}\n${entry.target}\n${entry.kind}`
+  );
+}
+
+function hardReplaceGlossaryTermsInText(text, glossaryEntries) {
+  let out = String(text ?? "");
+  const applied = [];
+
+  for (const entry of sortGlossaryEntriesForReplacement(glossaryEntries)) {
+    const source = trimString(entry.source);
+    const target = trimString(entry.target);
+    if (!source || !target) continue;
+
+    let replacedCount = 0;
+    out = out.replace(buildBoundaryRegex(source), (_match, before) => {
+      replacedCount += 1;
+      return `${before}${target}`;
+    });
+
+    if (replacedCount > 0) {
+      applied.push({
+        source,
+        target,
+        context: trimString(entry.context || ""),
+        kind: trimString(entry.kind || "word") || "word",
+        count: replacedCount,
+      });
+    }
+  }
+
+  return { text: out, applied };
+}
+
+function buildRelevantAcronymLocks(text, glossaryEntries) {
+  const sourceText = String(text ?? "");
+  const locks = [];
+  const seen = new Set();
+
+  for (const entry of sortGlossaryEntriesForReplacement(glossaryEntries)) {
+    const source = trimString(entry.source);
+    const target = trimString(entry.target);
+    const kind = trimString(entry.kind || "word") || "word";
+
+    if (kind !== "acronym" || !source || !target) continue;
+    if (seen.has(`${source}\n${target}`)) continue;
+    if (!buildBoundaryRegex(target).test(sourceText)) continue;
+
+    seen.add(`${source}\n${target}`);
+    locks.push({
+      source,
+      target,
+      placeholder: `__lock_acronym_${locks.length + 1}__`,
+    });
+  }
+
+  return locks;
+}
+
+function applyAcronymLocksToText(text, locks) {
+  let out = String(text ?? "");
+  for (const lock of locks) {
+    out = out.replace(buildBoundaryRegex(lock.target), (_match, before) => {
+      return `${before}${lock.placeholder}`;
+    });
+  }
+  return out;
+}
+
+function restoreAcronymLocksInText(text, locks) {
+  let out = String(text ?? "");
+  for (const lock of locks) {
+    out = out.split(lock.placeholder).join(lock.target);
+  }
+  return out;
+}
+
+function findIllustratorExe() {
+  const roots = [process.env.ProgramFiles, process.env["ProgramFiles(x86)"]].filter(Boolean);
+  const candidates = [];
+
+  for (const root of roots) {
+    const adobeDir = path.join(root, "Adobe");
+    if (!fs.existsSync(adobeDir)) continue;
+
+    for (const entry of fs.readdirSync(adobeDir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      if (!/^Adobe Illustrator/i.test(entry.name)) continue;
+
+      const exe = path.join(
+        adobeDir,
+        entry.name,
+        "Support Files",
+        "Contents",
+        "Windows",
+        "Illustrator.exe"
+      );
+
+      if (fs.existsSync(exe)) {
+        candidates.push(exe);
+      }
+    }
+  }
+
+  if (!candidates.length) return null;
+
+  return candidates
+    .map((p) => ({ p, t: fs.statSync(p).mtimeMs }))
+    .sort((a, b) => b.t - a.t)[0].p;
+}
+
+function ensureDir(dir) {
+  fs.mkdirSync(dir, { recursive: true });
+}
+
+function safeBaseName(file) {
+  return path.basename(file, path.extname(file));
+}
+
+function makeTempStem(filePath) {
+  const base = safeBaseName(filePath)
+    .replace(/[^\w.-]+/g, "_")
+    .replace(/^_+|_+$/g, "") || "diagram";
+
+  const hash = crypto
+    .createHash("sha1")
+    .update(path.resolve(filePath))
+    .digest("hex")
+    .slice(0, 12);
+
+  return `${base}.${hash}`;
+}
+
+function readJson(filePath) {
+  return JSON.parse(fs.readFileSync(filePath, "utf8"));
+}
+
+function writeTextAtomic(filePath, text) {
+  writeFileAtomicSync(filePath, text, "utf8");
+}
+
+function writeJson(filePath, obj) {
+  writeJsonAtomicSync(filePath, obj);
+}
+
+function removeFileIfExists(filePath) {
+  deleteStateFileIfExists(filePath, "Illustrator coordination file");
+}
+
+function tryReadJson(filePath) {
+  try {
+    if (!fs.existsSync(filePath)) return null;
+    return readJson(filePath);
+  } catch {
+    return null;
+  }
+}
+
+function makeFailureLogPath(tempRoot) {
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  return path.join(tempRoot, `Illustrator_Translate_Diagrams_Batch.failures.${stamp}.txt`);
+}
+
+function appendFailureLog(logPath, lines) {
+  const payload = Array.isArray(lines) ? lines.join("\n") : String(lines);
+  fs.appendFileSync(logPath, payload + "\n", "utf8");
+}
+
+async function waitForSignalFile({
+  filePath,
+  timeoutMs,
+  illustratorState,
+  errorPaths,
+  stageLabel,
+  onTimeoutMessage,
+}) {
+  const start = Date.now();
+
+  while (true) {
+    if (fs.existsSync(filePath)) return;
+
+    if (Array.isArray(errorPaths)) {
+      for (const errPath of errorPaths) {
+        if (!errPath || !fs.existsSync(errPath)) continue;
+
+        const errPayload = tryReadJson(errPath);
+        if (errPayload && errPayload.message) {
+          const location = errPayload.file ? `\nTarget file: ${errPayload.file}` : "";
+          const details = Array.isArray(errPayload.issues) && errPayload.issues.length
+            ? `\nIssues:\n- ${errPayload.issues.join("\n- ")}`
+            : "";
+          throw new Error(
+            `Illustrator JSX failed during ${stageLabel}: ${errPayload.message}${location}${details}`
+          );
+        }
+        if (errPayload && errPayload.error) {
+          throw new Error(
+            `Illustrator controller failed during ${stageLabel}: ${errPayload.error}`
+          );
+        }
+        throw new Error(`Illustrator reported an error during ${stageLabel}. See: ${errPath}`);
+      }
+    }
+
+    if (illustratorState && illustratorState.exited) {
+      throw new Error(
+        illustratorState.exitSignal
+          ? `Illustrator exited during ${stageLabel} due to signal ${illustratorState.exitSignal}`
+          : `Illustrator exited during ${stageLabel} with code ${illustratorState.exitCode}`
+      );
+    }
+
+    if (Date.now() - start > timeoutMs) {
+      const extra = onTimeoutMessage ? ` ${onTimeoutMessage}` : "";
+      throw new Error(`Timed out waiting for file: ${filePath}.${extra}`);
+    }
+
+    await sleep(WAIT_POLL_MS);
+  }
+}
+
+function uniqueBy(items, keyFn) {
+  const seen = new Set();
+  const out = [];
+  for (const item of items) {
+    const key = keyFn(item);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+  }
+  return out;
+}
+
+function makeGlossarySection(scanPayload) {
+  const glossary = Array.isArray(scanPayload.glossary) ? scanPayload.glossary : [];
+
+  const normalized = glossary
+    .map((g) => ({
+      source: trimString(g.source),
+      target: trimString(g.target),
+      context: trimString(g.context || ""),
+      kind: trimString(g.kind || "word"),
+    }))
+    .filter((g) => g.source && g.target);
+
+  return uniqueBy(normalized, (g) => `${g.source}\n${g.target}\n${g.kind}`);
+}
+
+function makeInputItems(scanPayload) {
+  const runs = Array.isArray(scanPayload.runs) ? scanPayload.runs : [];
+  const glossary = makeGlossarySection(scanPayload);
+  const glossaryIndex = buildGlossaryIndex(glossary);
+
+  return runs.map((run) => {
+    const originalText = String(run.originalText || "");
+    const { leading, core, trailing } = splitOuterWhitespace(originalText);
+    const sourceText = normalizeToLF(core);
+    const glossaryMatches = enrichGlossaryMatches(run.glossaryMatches, glossaryIndex);
+    const replaced = hardReplaceGlossaryTermsInText(sourceText, glossaryMatches);
+    const acronymLocks = buildRelevantAcronymLocks(replaced.text, glossaryMatches);
+    const lockedText = applyAcronymLocksToText(replaced.text, acronymLocks);
+
+    const item = {
+      id: String(run.id),
+      sourceText,
+      text: lockedText,
+      leadingWhitespace: leading,
+      trailingWhitespace: trailing,
+      originalLineBreakStyle: getLineBreakStyle(core),
+      originalLineBreakCount: countLineBreaks(core),
+      glossaryMatches,
+      appliedGlossaryReplacements: replaced.applied,
+      lockedAcronyms: acronymLocks,
+      skipTranslation: shouldSkipTranslation(core),
+    };
+    item.localTranslation = deterministicTranslation(item);
+    return item;
+  });
+}
+
+function deterministicTranslation(item) {
+  if (item.skipTranslation) return item.sourceText;
+  const sourceKey = normalizeLookupKey(item.sourceText);
+  if ((GLOSSARY_RESOURCES?.contextualGlossary || []).some(entry => normalizeLookupKey(entry.source) === sourceKey)) return null;
+  const exact = item.glossaryMatches.filter(entry => entry.source === item.sourceText);
+  const targets = new Set(exact.map(entry => entry.target));
+  if (targets.size !== 1) return null;
+  const target = [...targets][0];
+  // Bypass the model only when normal glossary replacement already produced
+  // the exact mandated term. Nested/conflicting locks still go to the model.
+  if (restoreAcronymLocksInText(item.text, item.lockedAcronyms) !== target || countLineBreaks(item.text) !== item.originalLineBreakCount) return null;
+  return item.text;
+}
+
+function buildDelimitedPrompt(scanPayload) {
+  const targetLanguage = trimString(scanPayload.targetLanguage || TARGET_LANGUAGE);
+  const glossary = makeGlossarySection(scanPayload);
+  const items = makeInputItems(scanPayload);
+  const itemPayloads = new Map(items.map(item => [item.id, {
+    id: item.id, text: item.text,
+    ...(item.lockedAcronyms.length ? { locked_acronyms: item.lockedAcronyms } : {}),
+  }]));
+  const contexts = scanPayload.diagramContext || [{
+    name: "Diagram", units: items.map(item => ({ id: item.id, text: item.sourceText })),
+  }];
+  const diagrams = contexts.map(context => ({
+    name: context.name,
+    items: context.units.map(unit => itemPayloads.get(unit.id) || { context_only: unit.text }),
+  }));
+  const contextText = contexts.flatMap(context => context.units.map(unit => unit.text)).join("\n");
+  const contextualGlossary = (GLOSSARY_RESOURCES?.contextualGlossary || []).filter(entry => matchesTerm(contextText, entry.source));
+
+  return [
+    "Translate the text items from the separately named Illustrator diagrams below in one batch.",
+    "Keep each diagram's context separate. Identical labels in different diagrams may have different meanings; do not force one translation across diagrams.",
+    "Items marked context_only are read-only surrounding source text; use them for meaning but do not return a translation for them.",
+    "The shared glossary and editorial rules apply to every diagram in this request.",
+    "Contextual glossary entries describe alternative senses. Choose the sense from the English text and diagram context; never combine senses or add the explanatory definitions to the translation.",
+    "Each item's text is the authoritative source to translate.",
+    "Some glossary terms may already be pre-replaced into the target language inside item text.",
+    "Do not translate pre-replaced glossary terms back into English or paraphrase them.",
+    "Any placeholder like __lock_acronym_1__ is a locked acronym token that must be preserved exactly.",
+    "Preserve ids exactly and return only valid JSON matching the schema.",
+    editorialRules.editorialPrompt(targetLanguage, "diagram", EDITORIAL_POLICY?.sha256),
+    "",
+    "<<<BEGIN_SHARED_SCHEMA>>>",
+    JSON.stringify({
+      input_type: "diagram_translation_batch",
+      output_type: {
+        translations: [
+          { id: "string", translated: "string" }
+        ]
+      }
+    }),
+    "<<<END_SHARED_SCHEMA>>>",
+    "",
+    "<<<BEGIN_SHARED_GLOSSARY>>>",
+    JSON.stringify({
+      target_language: targetLanguage,
+      rules: [
+        "Use exact glossary target terms whenever the glossary source term appears.",
+        "Use glossary context only as semantic guidance.",
+        "If an item is only a glossary term, return only the exact glossary target term.",
+        "Some glossary terms may already appear in target-language form inside the item text. Keep them exactly."
+      ],
+      shared_glossary: glossary,
+      contextual_glossary: contextualGlossary
+    }),
+    "<<<END_SHARED_GLOSSARY>>>",
+    "",
+    "<<<BEGIN_TEXT_ITEMS>>>",
+    JSON.stringify({
+      instructions: [
+        "Translate each item into the target language.",
+        `Write fully in ${targetLanguage}. No ordinary English lexical words should remain unless they are required unchanged items such as email addresses, URLs, file names, code, or locked acronym placeholders.`,
+        "Do not assume a capitalized English word is a proper noun. Translate it unless it is a true name or another required unchanged item.",
+        "Normalize capitalization to natural target-language conventions while preserving meaning and required tokens.",
+        "Do not omit any item.",
+        "Do not add information, summarize, or split one item into multiple ideas.",
+        "Preserve punctuation, numbering, and formatting inside each item.",
+        "Preserve internal line breaks exactly.",
+        "Do not collapse multi-line text into one line.",
+        "Preserve every locked acronym placeholder exactly and do not expand, translate, or remove it.",
+        "Return translations only in the required JSON schema."
+      ],
+      diagrams
+    }),
+    "<<<END_TEXT_ITEMS>>>"
+  ].join("\n");
+}
+
+function buildResponseSchema(expectedIds) {
+  return {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        translations: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              id: {
+                type: "string",
+                enum: expectedIds
+              },
+              translated: {
+                type: "string"
+              }
+            },
+            required: ["id", "translated"]
+          }
+        }
+      },
+      required: ["translations"]
+  };
+}
+
+function codexEnvironment() {
+  const childEnv = { ...process.env };
+  for (const name of ["OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_ORG_ID", "OPENAI_ORGANIZATION", "OPENAI_PROJECT"]) {
+    delete childEnv[name];
+  }
+  return childEnv;
+}
+
+function runCodex(args, options = {}) {
+  const run = spawnSync(CODEX_NODE_EXE, [CODEX_CLI_JS, ...args], {
+    cwd: options.cwd,
+    env: codexEnvironment(),
+    input: options.input,
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+    timeout: options.timeoutMs || 60000,
+    killSignal: "SIGTERM",
+    windowsHide: true,
+  });
+  if (run.error) throw new Error(`Codex subscription process failed: ${run.error.message}`, { cause: run.error });
+  return run;
+}
+
+function assertChatGptLogin() {
+  const status = runCodex(["login", "status"]);
+  const diagnostic = `${status.stdout || ""}\n${status.stderr || ""}`;
+  if (status.status !== 0 || !/Logged in using ChatGPT/i.test(diagnostic)) {
+    throw new Error("Diagram translation requires Codex logged in with ChatGPT; API-key authentication is disabled.");
+  }
+}
+
+async function resolveSubscriptionModel(expectedModel) {
+  try {
+    const resolver = await import(pathToFileURL(MODEL_RESOLVER).href);
+    return await resolver.resolveLatestSubscriptionModel({
+      nodePath: CODEX_NODE_EXE, cliPath: CODEX_CLI_JS,
+      expectedModel, reasoningEffort: REASONING_EFFORT,
+    });
+  } catch (error) {
+    if (error?.code === "LATEST_MODEL_POLICY_FAILURE") throw error;
+    const failure = new Error("Fresh model discovery failed; the diagram run must stop.");
+    failure.code = "LATEST_MODEL_POLICY_FAILURE";
+    throw failure;
+  }
+}
+
+async function translateDiagramOnce(scanPayload, statePaths) {
+  const runs = Array.isArray(scanPayload.runs) ? scanPayload.runs : [];
+  const items = makeInputItems(scanPayload);
+
+  if (!runs.length) {
+    return { translations: [] };
+  }
+
+  const onlySkippable = items.every((item) => item.skipTranslation);
+  if (onlySkippable) {
+    return {
+      translations: runs.map((run, idx) => ({
+        id: String(run.id),
+        translated: items[idx].sourceText
+      }))
+    };
+  }
+
+  const expectedIds = runs.map((run) => String(run.id));
+  const prompt = buildDelimitedPrompt(scanPayload);
+  writeJson(statePaths.codexSchemaJson, buildResponseSchema(expectedIds));
+  writeTextAtomic(statePaths.codexPromptText, prompt);
+  let lastErr;
+  const queryResolutions = [];
+
+  for (let attempt = 1; attempt <= MAX_SUBSCRIPTION_RETRIES; attempt++) {
+    // Resolve outside the retry catch: a policy failure must stop the whole run.
+    const queryModelResolution = await resolveSubscriptionModel(MODEL);
+    queryResolutions.push({ attempt, ...queryModelResolution });
+    writeJson(statePaths.codexRequestJson, {
+      model: MODEL, reasoningEffort: REASONING_EFFORT, queries: queryResolutions,
+      editorialRules: editorialRules.resolveEditorialRules(scanPayload.targetLanguage || TARGET_LANGUAGE, "diagram"),
+    });
+    try {
+      removeFileIfExists(statePaths.codexResponseJson);
+      PERFORMANCE.modelQueries++;
+      PERFORMANCE.promptCharacters += prompt.length;
+      const run = runCodex([
+        "exec", "-",
+        "--model", MODEL,
+        "-c", `model_reasoning_effort=\"${REASONING_EFFORT}\"`,
+        "--strict-config",
+        "--sandbox", "read-only",
+        "--skip-git-repo-check",
+        "--ephemeral",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--output-schema", statePaths.codexSchemaJson,
+        "--output-last-message", statePaths.codexResponseJson,
+        "--cd", path.dirname(statePaths.codexResponseJson),
+        "--color", "never",
+      ], {
+        cwd: path.dirname(statePaths.codexResponseJson),
+        input: prompt,
+        timeoutMs: CODEX_QUERY_TIMEOUT_MS,
+      });
+      if (run.status !== 0) {
+        throw new Error(`Codex subscription query exited with code ${run.status}. Raw process output is withheld because it may contain authentication details.`);
+      }
+      const parsed = readJson(statePaths.codexResponseJson);
+      validateTranslations(scanPayload, parsed);
+
+      return parsed;
+    } catch (err) {
+      lastErr = err;
+      console.warn(`Diagram subscription retry ${attempt}/${MAX_SUBSCRIPTION_RETRIES} failed: ${err.message}`);
+      await sleep(1000 * attempt);
+    }
+  }
+
+  throw lastErr;
+}
+
+async function translateEfficientDiagram(scanPayload, statePaths) {
+  const plan = compactQuery(scanPayload, makeInputItems(scanPayload));
+  const response = plan.query.runs.length
+    ? await translateDiagramOnce(plan.query, statePaths)
+    : { translations: [] };
+  const expanded = expandResponse(plan, response);
+  validateTranslations(scanPayload, expanded);
+  return expanded;
+}
+
+function assertDiagramResourcesCurrent() {
+  for (const [file, expected] of RESOURCE_HASHES || []) {
+    if (hashFile(file) !== expected) throw new Error("Diagram glossary inputs changed during this run; stop and prepare again.");
+  }
+  if (LEDGER && hashFile(LEDGER.filePath) !== LEDGER.sha256) {
+    throw new Error("Diagram ledger changed during this run; stop and prepare again.");
+  }
+  editorialRules.editorialPrompt(TARGET_LANGUAGE, "diagram", EDITORIAL_POLICY?.sha256);
+}
+
+async function prepareLedgerTranslations(entries, tempRoot) {
+  const pairs = buildLedgerGlossary(readJson(GLOSSARY_RESOURCES.wordsJson), readJson(GLOSSARY_RESOURCES.acronymsJson), GLOSSARY_RESOURCES.glossaryTermKey);
+  const prepared = new Map();
+  const pending = [];
+  let reused = 0;
+  let unchanged = 0;
+  let glossaryOnly = 0;
+  for (const entry of new Set(entries)) {
+    const scan = ledgerScan(entry, TARGET_LANGUAGE, pairs);
+    const known = translationsForLanguage(entry, TARGET_LANGUAGE);
+    const translations = new Map();
+    const runs = [];
+    const items = makeInputItems(scan);
+    for (let i = 0; i < scan.runs.length; i++) {
+      const run = scan.runs[i];
+      const item = items[i];
+      if (known.has(run.id)) { translations.set(run.id, known.get(run.id)); reused++; }
+      else if (typeof item.localTranslation === "string") {
+        translations.set(run.id, `${item.leadingWhitespace}${restoreAcronymLocksInText(item.localTranslation, item.lockedAcronyms)}${item.trailingWhitespace}`);
+        if (item.skipTranslation) unchanged++; else glossaryOnly++;
+      }
+      else runs.push(run);
+    }
+    prepared.set(entry, { scan, translations });
+    pending.push({ ...scan, runs });
+  }
+  const batches = packDiagramScans(pending);
+  console.log(`Preparing ${batches.length} model batch(es) before Illustrator opens; ${reused} ledger translations reused, ${unchanged} numeric-only and ${glossaryOnly} exact-glossary items handled locally.`);
+  const translatedById = new Map();
+  for (let i = 0; i < batches.length; i++) {
+    assertDiagramResourcesCurrent();
+    console.log(`Translation batch ${i + 1}/${batches.length}: ${batches[i].diagramContext.length} diagrams, ${batches[i].runs.length} text items.`);
+    const payload = await translateEfficientDiagram(batches[i], makePerFilePaths(tempRoot, `ledger-batch-${i + 1}`));
+    const restored = sortTranslationsLikeRuns(batches[i], payload);
+    for (const row of restored.translations) translatedById.set(row.id, row.translated);
+  }
+  for (const { scan, translations } of prepared.values()) {
+    for (const run of scan.runs) {
+      if (!translations.has(run.id)) {
+        if (!translatedById.has(run.id)) throw new Error(`Prepared batch omitted diagram text ${run.id}.`);
+        translations.set(run.id, translatedById.get(run.id));
+      }
+    }
+  }
+  assertDiagramResourcesCurrent();
+  // Retain bounded recovery evidence in the existing run scratch directory;
+  // the public ledger is still updated only after the corresponding artwork saves.
+  writeJson(path.join(tempRoot, "prepared-ledger-translations.json"), {
+    model: MODEL, reasoningEffort: REASONING_EFFORT, ledgerSha256: LEDGER.sha256,
+    performance: PERFORMANCE,
+    diagrams: [...prepared].map(([entry, value]) => ({ file: entry.file, sha256: entry.sha256, translations: Object.fromEntries(value.translations) })),
+  });
+  return prepared;
+}
+
+function validateTranslations(scanPayload, translationPayload) {
+  const runs = Array.isArray(scanPayload.runs) ? scanPayload.runs : [];
+  const items = makeInputItems(scanPayload);
+  const itemById = new Map(items.map((item) => [item.id, item]));
+  const expectedIds = {};
+  let i;
+
+  for (i = 0; i < runs.length; i++) {
+    expectedIds[String(runs[i].id)] = true;
+  }
+
+  if (!translationPayload || !Array.isArray(translationPayload.translations)) {
+    throw new Error("translationPayload.translations is missing or not an array.");
+  }
+
+  const seen = {};
+  for (i = 0; i < translationPayload.translations.length; i++) {
+    const row = translationPayload.translations[i];
+    const id = String(row.id);
+
+    if (!expectedIds[id]) {
+      throw new Error("Response included unexpected id: " + id);
+    }
+    if (seen[id]) {
+      throw new Error("Response included duplicate id: " + id);
+    }
+    if (typeof row.translated !== "string") {
+      throw new Error("Response translated value must be a string for id: " + id);
+    }
+    const item = itemById.get(id);
+    if (item.skipTranslation && row.translated !== item.sourceText) {
+      throw new Error("Skippable diagram text changed for id: " + id);
+    }
+    if (countLineBreaks(row.translated) !== item.originalLineBreakCount) {
+      throw new Error("Response changed the line-break count for id: " + id);
+    }
+    if (item.sourceText.trim() && !row.translated.trim()) {
+      throw new Error("Response returned a blank translation for id: " + id);
+    }
+    for (const lock of item.lockedAcronyms || []) {
+      const expected = item.text.split(lock.placeholder).length - 1;
+      const actual = row.translated.split(lock.placeholder).length - 1;
+      if (actual !== expected) {
+        throw new Error(`Response changed locked acronym ${lock.placeholder} for id ${id}: expected ${expected}, found ${actual}.`);
+      }
+    }
+    const knownLocks = new Set((item.lockedAcronyms || []).map((lock) => lock.placeholder));
+    const inventedLocks = row.translated.match(/__lock_acronym_\d+__/g) || [];
+    if (inventedLocks.some((token) => !knownLocks.has(token))) {
+      throw new Error("Response invented a locked acronym placeholder for id: " + id);
+    }
+
+    seen[id] = true;
+  }
+
+  for (const id in expectedIds) {
+    if (Object.prototype.hasOwnProperty.call(expectedIds, id) && !seen[id]) {
+      throw new Error("Response omitted required id: " + id);
+    }
+  }
+}
+
+function sortTranslationsLikeRuns(scanPayload, translationPayload, { alreadyFinal = false } = {}) {
+  const byId = {};
+  for (const row of translationPayload.translations) {
+    byId[String(row.id)] = row;
+  }
+
+  const inputItems = makeInputItems(scanPayload);
+
+  return {
+    sourceFile: scanPayload.file || "",
+    targetLanguage: scanPayload.targetLanguage || TARGET_LANGUAGE,
+    count: (scanPayload.runs || []).length,
+    translations: (scanPayload.runs || []).map((run, idx) => {
+      const item = inputItems[idx];
+      let translatedCore = String(byId[String(run.id)].translated || "");
+
+      if (!alreadyFinal) {
+        translatedCore = restoreAcronymLocksInText(translatedCore, item.lockedAcronyms || []);
+        translatedCore = convertLineBreaks(
+          translatedCore,
+          item.originalLineBreakStyle || "\r"
+        );
+        translatedCore = `${item.leadingWhitespace}${translatedCore}${item.trailingWhitespace}`;
+      }
+
+      return {
+        id: String(run.id),
+        frameIndex: run.frameIndex,
+        start: run.start,
+        length: run.length,
+        translated: translatedCore
+      };
+    })
+  };
+}
+
+function launchIllustratorControllerAsync(illustratorExe, controllerJsxPath, envVars) {
+  const child = spawn(illustratorExe, ["-r", controllerJsxPath], {
+    env: { ...process.env, ...envVars },
+    windowsHide: false,
+    stdio: "inherit",
+  });
+
+  const state = {
+    exited: false,
+    exitCode: null,
+    exitSignal: null,
+  };
+
+  const completion = new Promise((resolve, reject) => {
+    child.on("error", reject);
+    child.on("exit", (code, signal) => {
+      state.exited = true;
+      state.exitCode = code;
+      state.exitSignal = signal ?? null;
+
+      if (code === 0) resolve();
+      else {
+        reject(new Error(
+          signal
+            ? `Illustrator exited due to signal ${signal}`
+            : `Illustrator exited with code ${code}`
+        ));
+      }
+    });
+  });
+
+  // Always observe the rejection so an unexpected application exit during
+  // retry, or Illustrator crashing) never becomes an unhandled rejection
+  // that crashes the Node process. State is tracked via `state.exited`.
+  completion.catch(() => {});
+
+  return { child, state, completion };
+}
+
+function assertBatchSucceeded(failureCount, totalCount, failureLogPath) {
+  if (!Number.isInteger(failureCount) || failureCount < 0 ||
+      !Number.isInteger(totalCount) || totalCount < failureCount) {
+    throw new Error(`Invalid Stage 3 batch totals: failed=${failureCount}, total=${totalCount}`);
+  }
+  if (failureCount > 0) {
+    throw new Error(
+      `Stage 3 completed with ${failureCount} failed diagram(s) out of ${totalCount}. ` +
+      `Review the failure log and rerun the failed files: ${failureLogPath}`
+    );
+  }
+}
+
+function buildControllerJsx({
+  jobsDir,
+  workerJsx,
+  readyJson,
+  stopJson,
+  sessionErrorJson,
+  pollMs,
+}) {
+  return `
+#target illustrator
+
+if (typeof JSON === "undefined") {
+  JSON = {};
+
+  JSON.stringify = function (value) {
+    function escapeString(str) {
+      var s = String(str);
+      var out = '"';
+      for (var i = 0; i < s.length; i++) {
+        var code = s.charCodeAt(i);
+        if (code === 0x22) { out += '\\\\"'; }
+        else if (code === 0x5C) { out += '\\\\\\\\'; }
+        else if (code === 0x08) { out += '\\\\b'; }
+        else if (code === 0x09) { out += '\\\\t'; }
+        else if (code === 0x0A) { out += '\\\\n'; }
+        else if (code === 0x0C) { out += '\\\\f'; }
+        else if (code === 0x0D) { out += '\\\\r'; }
+        else if (code < 0x20 || code === 0x7F) {
+          var hex = code.toString(16);
+          while (hex.length < 4) hex = '0' + hex;
+          out += '\\\\u' + hex;
+        } else {
+          out += s.charAt(i);
+        }
+      }
+      out += '"';
+      return out;
+    }
+
+    function stringify(v) {
+      var i, key, parts;
+
+      if (v === null) return "null";
+
+      switch (typeof v) {
+        case "string":
+          return escapeString(v);
+        case "number":
+          return isFinite(v) ? String(v) : "null";
+        case "boolean":
+          return v ? "true" : "false";
+        case "object":
+          if (v instanceof Array) {
+            parts = [];
+            for (i = 0; i < v.length; i++) {
+              parts.push(stringify(v[i]));
+            }
+            return "[" + parts.join(",") + "]";
+          }
+
+          parts = [];
+          for (key in v) {
+            if (v.hasOwnProperty(key)) {
+              parts.push(stringify(String(key)) + ":" + stringify(v[key]));
+            }
+          }
+          return "{" + parts.join(",") + "}";
+        default:
+          return "null";
+      }
+    }
+
+    return stringify(value);
+  };
+
+  JSON.parse = function (text) {
+    return eval("(" + text + ")");
+  };
+}
+
+(function () {
+  function writeText(filePath, text) {
+    var f = new File(filePath);
+    f.encoding = "UTF-8";
+    if (!f.open("w")) throw new Error("Could not open file for writing: " + filePath);
+    f.write(text);
+    f.close();
+  }
+
+  function writeJson(filePath, obj) {
+    writeText(filePath, JSON.stringify(obj));
+  }
+
+  function readText(filePath) {
+    var f = new File(filePath);
+    f.encoding = "UTF-8";
+    if (!f.exists) return "";
+    if (!f.open("r")) throw new Error("Could not open file for reading: " + filePath);
+    var s = f.read();
+    f.close();
+    return s;
+  }
+
+  function readJson(filePath) {
+    return JSON.parse(readText(filePath));
+  }
+
+  function listJobFiles(folderPath) {
+    var folder = new Folder(folderPath);
+    if (!folder.exists) return [];
+    var files = folder.getFiles(function (entry) {
+      return entry instanceof File && /\\.job\\.json$/i.test(entry.name);
+    });
+    files.sort(function (a, b) {
+      var an = a.name.toLowerCase();
+      var bn = b.name.toLowerCase();
+      if (an < bn) return -1;
+      if (an > bn) return 1;
+      return 0;
+    });
+    return files;
+  }
+
+  function renameFileInPlace(fileObj, newName) {
+    return fileObj.rename(newName);
+  }
+
+  function setEnvMap(envMap) {
+    for (var key in envMap) {
+      if (!envMap.hasOwnProperty(key)) continue;
+      try {
+        $.setenv(key, String(envMap[key]));
+      } catch (_) {}
+    }
+  }
+
+  function clearSessionError() {
+    var f = new File(${JSON.stringify(sessionErrorJson)});
+    if (f.exists) {
+      try { f.remove(); } catch (_) {}
+    }
+  }
+
+  function writeSessionError(err, stage, filePath) {
+    try {
+      writeJson(${JSON.stringify(sessionErrorJson)}, {
+        error: String(err),
+        stage: String(stage || ""),
+        file: String(filePath || ""),
+        ts: new Date().toUTCString()
+      });
+    } catch (_) {}
+  }
+
+  try {
+    clearSessionError();
+    if (app.documents.length) throw new Error("Close existing Illustrator documents before starting an isolated diagram batch.");
+    writeJson(${JSON.stringify(readyJson)}, {
+      ready: true,
+      ts: new Date().toUTCString(),
+      app: app.name,
+      version: app.version
+    });
+
+    while (true) {
+      var stopFile = new File(${JSON.stringify(stopJson)});
+      if (stopFile.exists) {
+        break;
+      }
+
+      var jobs = listJobFiles(${JSON.stringify(jobsDir)});
+      if (!jobs.length) {
+        $.sleep(${Number(pollMs) || 500});
+        continue;
+      }
+
+      var jobFile = jobs[0];
+      var workingName = jobFile.name.replace(/\\.job\\.json$/i, ".working.json");
+      renameFileInPlace(jobFile, workingName);
+
+      var workingFile = new File(jobFile.parent.fsName + "/" + workingName);
+      var job = null;
+
+      try {
+        job = readJson(workingFile.fsName);
+
+        if (!job || !job.env || !job.controllerDoneJson || !job.controllerErrorJson) {
+          throw new Error("Invalid controller job payload.");
+        }
+
+        var doneFile = new File(job.controllerDoneJson);
+        var errFile = new File(job.controllerErrorJson);
+
+        try { if (doneFile.exists) doneFile.remove(); } catch (_) {}
+        try { if (errFile.exists) errFile.remove(); } catch (_) {}
+
+        setEnvMap(job.env);
+
+        try {
+          $.evalFile(${JSON.stringify(workerJsx)});
+        } catch (workerErr) {
+          try {
+            writeJson(job.controllerErrorJson, {
+              error: String(workerErr),
+              phase: "worker_eval",
+              ts: new Date().toUTCString()
+            });
+          } catch (_) {}
+          throw workerErr;
+        }
+
+        try {
+          writeJson(job.controllerDoneJson, {
+            ok: true,
+            ts: new Date().toUTCString()
+          });
+        } catch (_) {}
+      } catch (jobErr) {
+        try {
+          if (job && job.controllerErrorJson) {
+            writeJson(job.controllerErrorJson, {
+              error: String(jobErr),
+              phase: "controller_job",
+              ts: new Date().toUTCString()
+            });
+          }
+        } catch (_) {}
+
+        writeSessionError(jobErr, "controller_job", job && job.env ? job.env.AI_BATCH_FILE : "");
+      } finally {
+        try { if (workingFile.exists) workingFile.remove(); } catch (_) {}
+      }
+    }
+  } catch (fatalErr) {
+    writeSessionError(fatalErr, "controller_fatal", "");
+  }
+})();
+`.trim();
+}
+
+function writeControllerJsx(controllerJsxPath, params) {
+  const jsx = buildControllerJsx(params);
+  writeTextAtomic(controllerJsxPath, jsx);
+}
+
+function makeSessionPaths(tempRoot) {
+  const sessionDir = path.join(tempRoot, "session");
+  const jobsDir = path.join(tempRoot, "jobs");
+  ensureDir(sessionDir);
+  ensureDir(jobsDir);
+
+  return {
+    sessionDir,
+    jobsDir,
+    controllerJsxPath: path.join(sessionDir, "Illustrator_Controller_Persistent.jsx"),
+    readyJson: path.join(sessionDir, "controller.ready.json"),
+    stopJson: path.join(sessionDir, "controller.stop.json"),
+    sessionErrorJson: path.join(sessionDir, "controller.error.json"),
+  };
+}
+
+async function startIllustratorSession({
+  illustratorExe,
+  controllerJsxPath,
+  jobsDir,
+  jsxWorker,
+  readyJson,
+  stopJson,
+  sessionErrorJson,
+}) {
+  removeFileIfExists(readyJson);
+  removeFileIfExists(stopJson);
+  removeFileIfExists(sessionErrorJson);
+
+  writeControllerJsx(controllerJsxPath, {
+    jobsDir,
+    workerJsx: jsxWorker,
+    readyJson,
+    stopJson,
+    sessionErrorJson,
+    pollMs: WAIT_POLL_MS,
+  });
+
+  const launch = launchIllustratorControllerAsync(illustratorExe, controllerJsxPath, {});
+
+  try { await waitForSignalFile({
+    filePath: readyJson,
+    timeoutMs: CONTROLLER_READY_TIMEOUT_MS,
+    illustratorState: launch.state,
+    errorPaths: [sessionErrorJson],
+    stageLabel: "controller startup",
+    onTimeoutMessage:
+      "Illustrator launched but the persistent controller did not report ready."
+  }); } catch (error) {
+    try { writeJson(stopJson, { stop: true }); } finally { launch.child.unref(); }
+    throw error;
+  }
+
+  return launch;
+}
+
+function makePerFilePaths(tempRoot, stem) {
+  const scanDir = path.join(tempRoot, "scan");
+  const translateDir = path.join(tempRoot, "translate");
+  const startupDir = path.join(tempRoot, "startup");
+  const errorDir = path.join(tempRoot, "error");
+  const controllerDoneDir = path.join(tempRoot, "controller-done");
+  const controllerErrorDir = path.join(tempRoot, "controller-error");
+  const codexDir = path.join(tempRoot, "codex-subscription");
+
+  ensureDir(scanDir);
+  ensureDir(translateDir);
+  ensureDir(startupDir);
+  ensureDir(errorDir);
+  ensureDir(controllerDoneDir);
+  ensureDir(controllerErrorDir);
+  ensureDir(codexDir);
+
+  return {
+    scanJson: path.join(scanDir, `${stem}.scan.json`),
+    ledgerUnitsJson: path.join(scanDir, `${stem}.ledger-units.json`),
+    translateJson: path.join(translateDir, `${stem}.translations.json`),
+    startupJson: path.join(startupDir, `${stem}.started.json`),
+    errorJson: path.join(errorDir, `${stem}.error.json`),
+    controllerDoneJson: path.join(controllerDoneDir, `${stem}.done.json`),
+    controllerErrorJson: path.join(controllerErrorDir, `${stem}.error.json`),
+    codexPromptText: path.join(codexDir, `${stem}.prompt.txt`),
+    codexSchemaJson: path.join(codexDir, `${stem}.schema.json`),
+    codexResponseJson: path.join(codexDir, `${stem}.response.json`),
+    codexRequestJson: path.join(codexDir, `${stem}.request.json`),
+  };
+}
+
+function clearPerFilePaths(pathsObj) {
+  for (const key of Object.keys(pathsObj)) {
+    removeFileIfExists(pathsObj[key]);
+  }
+}
+
+function submitControllerJob({ jobsDir, stem, envVars, controllerDoneJson, controllerErrorJson }) {
+  const jobPath = path.join(jobsDir, `${stem}.${Date.now()}.job.json`);
+  writeJson(jobPath, {
+    env: envVars,
+    controllerDoneJson,
+    controllerErrorJson,
+    ts: new Date().toISOString(),
+  });
+  return jobPath;
+}
+
+async function waitForControllerJobDone({
+  controllerDoneJson,
+  controllerErrorJson,
+  workerErrorJson,
+  sessionErrorJson,
+  illustratorState,
+  timeoutMs,
+  aiFile,
+}) {
+  await waitForSignalFile({
+    filePath: controllerDoneJson,
+    timeoutMs,
+    illustratorState,
+    errorPaths: [controllerErrorJson, workerErrorJson, sessionErrorJson],
+    stageLabel: `job completion for ${aiFile}`,
+    onTimeoutMessage:
+      "The worker started but did not finish in time."
+  });
+}
+
+function persistLedgerTranslations(ledgerEntry, finalPayload) {
+  if (!LEDGER_REQUESTED || !LEDGER || !ledgerEntry || !finalPayload) return;
+  const changed = recordTranslations(ledgerEntry, TARGET_LANGUAGE, finalPayload.translations);
+  if (!changed) return;
+  const result = writeLedger(LEDGER, LEDGER.source, { language: TARGET_LANGUAGE });
+  console.log(`Recorded ${changed} ${TARGET_LANGUAGE} translation(s) in ${result.filePath}.`);
+}
+
+async function processFileInSession({
+  aiFile,
+  illustratorState,
+  jobsDir,
+  tempRoot,
+  sessionErrorJson,
+}) {
+  assertDiagramResourcesCurrent();
+  const stem = makeTempStem(aiFile);
+  const perFile = makePerFilePaths(tempRoot, stem);
+
+  clearPerFilePaths(perFile);
+  // Clear the shared session error from any previous file. Without this, a
+  // residual sessionErrorJson cascades and is misreported as the current
+  // file's error, breaking the rest of the batch.
+  removeFileIfExists(sessionErrorJson);
+
+  if (!fs.existsSync(aiFile)) {
+    throw new Error(`Source .ai file does not exist on disk: ${aiFile}`);
+  }
+  const publication = prepareDiagramPublication(aiFile);
+
+  let ledgerEntry = null;
+  if (LEDGER_REQUESTED) {
+    ledgerEntry = matchDiagram(LEDGER, aiFile).entry;
+    writeJson(perFile.ledgerUnitsJson, { file: aiFile, units: unitsForWorker(ledgerEntry) });
+  }
+
+  const envVars = {
+    AI_MODE: LEDGER_REQUESTED ? "ledger" : "process",
+    AI_BATCH_FILE: aiFile,
+    AI_OUTPUT_FILE: publication.outputPath,
+    AI_SCAN_JSON: perFile.scanJson,
+    AI_LEDGER_UNITS_JSON: perFile.ledgerUnitsJson,
+    AI_TRANSLATION_JSON: perFile.translateJson,
+    AI_STARTUP_JSON: perFile.startupJson,
+    AI_ERROR_JSON: perFile.errorJson,
+    AI_OPEN_SANS_MATCHES: OPEN_SANS_MATCHES.join("|"),
+    AI_SOURCE_CODE_MATCHES: SOURCE_CODE_MATCHES.join("|"),
+    AI_TARGET_LANGUAGE: TARGET_LANGUAGE,
+    AI_GLOSSARY_TERM_KEY: GLOSSARY_RESOURCES.glossaryTermKey,
+    AI_SYMBOL_LANGUAGE: GLOSSARY_RESOURCES.targetLanguage,
+    AI_NEW_WORDS_JSON: GLOSSARY_RESOURCES.wordsJson,
+    AI_NEW_ACRONYMS_JSON: GLOSSARY_RESOURCES.acronymsJson,
+    AI_NEW_ACRONYMS_SYMBOLS_JSON: GLOSSARY_RESOURCES.symbolsJson,
+    AI_WAIT_TIMEOUT_MS: String(WORKER_TRANSLATION_WAIT_MS),
+    AI_WAIT_POLL_MS: String(WAIT_POLL_MS),
+    AI_QUIT_ON_FINISH: "0",
+  };
+
+  submitControllerJob({
+    jobsDir,
+    stem,
+    envVars,
+    controllerDoneJson: perFile.controllerDoneJson,
+    controllerErrorJson: perFile.controllerErrorJson,
+  });
+
+  await waitForSignalFile({
+    filePath: perFile.startupJson,
+    timeoutMs: STARTUP_TIMEOUT_MS,
+    illustratorState,
+    errorPaths: [perFile.controllerErrorJson, perFile.errorJson, sessionErrorJson],
+    stageLabel: "startup",
+    onTimeoutMessage:
+      "Illustrator may be blocked by a permission or security prompt before the JSX begins running."
+  });
+
+  await waitForSignalFile({
+    filePath: perFile.scanJson,
+    timeoutMs: WAIT_TIMEOUT_MS,
+    illustratorState,
+    errorPaths: [perFile.controllerErrorJson, perFile.errorJson, sessionErrorJson],
+    stageLabel: "scan generation",
+    onTimeoutMessage:
+      "The JSX started but did not produce scan JSON in time. Check Illustrator for open dialogs, missing fonts, or document-specific script errors."
+  });
+
+  const scanData = readJson(perFile.scanJson);
+  if (ledgerEntry) {
+    validateMatchReport(ledgerEntry, scanData);
+  }
+  const runs = Array.isArray(scanData.runs) ? scanData.runs : [];
+
+  if (!runs.length) {
+    console.log("No Open Sans text found. Waiting for Illustrator to finish save/close...");
+    writeJson(perFile.translateJson, {
+      sourceFile: aiFile,
+      targetLanguage: TARGET_LANGUAGE,
+      count: 0,
+      translations: [],
+    });
+
+    await waitForControllerJobDone({
+      controllerDoneJson: perFile.controllerDoneJson,
+      controllerErrorJson: perFile.controllerErrorJson,
+      workerErrorJson: perFile.errorJson,
+      sessionErrorJson,
+      illustratorState,
+      timeoutMs: WAIT_TIMEOUT_MS,
+      aiFile,
+    });
+
+    const finalModelResolution = await resolveSubscriptionModel(MODEL);
+    assertDiagramResourcesCurrent();
+    writeJson(`${perFile.translateJson}.publication.json`, { publication, finalModelResolution });
+    publishDiagram(publication);
+    console.log("Done.");
+    return;
+  }
+
+  const prepared = ledgerEntry ? PREPARED_LEDGER_TRANSLATIONS?.get(ledgerEntry) : null;
+  if (ledgerEntry && !prepared) throw new Error("Ledger translations were not prepared before Illustrator started.");
+  if (prepared && JSON.stringify(makeInputItems(scanData)) !== JSON.stringify(makeInputItems(prepared.scan))) {
+    throw new Error("Illustrator's matched text or glossary differs from the prepared translation inputs; no translation will be applied.");
+  }
+  const knownTranslations = prepared ? prepared.translations : new Map();
+  const reusedTranslations = [];
+  const pendingRuns = [];
+  for (const run of runs) {
+    const value = knownTranslations.get(String(run.id));
+    if (value === undefined) pendingRuns.push(run);
+    else reusedTranslations.push({ id: String(run.id), translated: value });
+  }
+
+  let modelTranslations = [];
+  if (pendingRuns.length) {
+    if (ledgerEntry) {
+      throw new Error("Prepared ledger translations are incomplete; no fallback model query is allowed during application.");
+    } else {
+      console.log(`Found ${runs.length} Open Sans text runs. Translating through the Codex subscription...`);
+    }
+    const modelPayload = await translateEfficientDiagram({ ...scanData, runs: pendingRuns }, perFile);
+    modelTranslations = Array.isArray(modelPayload.translations) ? modelPayload.translations : [];
+  } else {
+    console.log(
+      `Found ${runs.length} ledger text items; every one already has a ${TARGET_LANGUAGE} ` +
+      "translation prepared for application."
+    );
+  }
+
+  const translationPayload = { translations: [...reusedTranslations, ...modelTranslations] };
+  // Prepared and approved ledger translations already contain their exact
+  // boundary whitespace and restored locks; only attach the matched locators.
+  const finalPayload = sortTranslationsLikeRuns(scanData, translationPayload, { alreadyFinal: !!prepared });
+  assertDiagramResourcesCurrent();
+
+  writeJson(perFile.translateJson, finalPayload);
+
+  console.log("Waiting for Illustrator to apply translations, save, and close...");
+
+  await waitForControllerJobDone({
+    controllerDoneJson: perFile.controllerDoneJson,
+    controllerErrorJson: perFile.controllerErrorJson,
+    workerErrorJson: perFile.errorJson,
+    sessionErrorJson,
+    illustratorState,
+    timeoutMs: WAIT_TIMEOUT_MS,
+    aiFile,
+  });
+
+  if (fs.existsSync(perFile.errorJson)) {
+    const errPayload = tryReadJson(perFile.errorJson);
+    if (errPayload && errPayload.message) {
+      throw new Error(`Illustrator JSX reported an error after translation: ${errPayload.message}`);
+    }
+  }
+
+  const finalModelResolution = await resolveSubscriptionModel(MODEL);
+  assertDiagramResourcesCurrent();
+  writeJson(`${perFile.translateJson}.publication.json`, { publication, finalModelResolution });
+  publishDiagram(publication);
+  persistLedgerTranslations(ledgerEntry, finalPayload);
+  console.log("Done.");
+}
+
+async function processFileWithRetry({
+  aiFile, illustratorExe, jsxWorker, sessionPaths, getSession, setSession,
+  tempRoot, failureLogPath, index, total,
+}) {
+  let session = getSession();
+  try {
+    if (!session || session.state.exited) {
+      session = await startIllustratorSession({
+        illustratorExe, controllerJsxPath: sessionPaths.controllerJsxPath,
+        jobsDir: sessionPaths.jobsDir, jsxWorker, readyJson: sessionPaths.readyJson,
+        stopJson: sessionPaths.stopJson, sessionErrorJson: sessionPaths.sessionErrorJson,
+      });
+      setSession(session);
+    }
+    await processFileInSession({ aiFile, illustratorState: session.state,
+      jobsDir: sessionPaths.jobsDir, tempRoot, sessionErrorJson: sessionPaths.sessionErrorJson });
+    return true;
+  } catch (err) {
+    // Never kill a shared Adobe process or retry an uncertain save. Signal the
+    // owned worker, retain its staged output, and stop the entire batch.
+    if (aiFile && tempRoot) {
+      const perFile = makePerFilePaths(tempRoot, makeTempStem(aiFile));
+      writeJson(perFile.errorJson, { message: "Batch aborted; do not publish the staged diagram." });
+    }
+    if (err?.code === "LATEST_MODEL_POLICY_FAILURE") throw err;
+    appendFailureLog(failureLogPath, [
+      `[${index + 1}/${total}] FAILED; batch stopped without retry`,
+      `File: ${aiFile}`, `Error: ${err.message}`,
+    ]);
+    throw err;
+  }
+}
+
+async function main() {
+  // Resolve the user's choice before loading resources, querying a model, or
+  // launching Adobe. An environment ledger path is not a mode selection.
+  const options = parseDiagramArguments(process.argv.slice(2));
+  const sourceMode = await chooseDiagramTextSource(options);
+  LEDGER_REQUESTED = sourceMode === "ledger";
+  LEDGER_PATH = options.ledgerPath;
+  const CHECK_ONLY = options.checkOnly;
+  const scriptDir = __dirname;
+  const jsxWorker = path.join(scriptDir, "Illustrator_Translate_Diagrams.jsx");
+
+  if (!fs.existsSync(jsxWorker)) {
+    console.error("Missing Illustrator JSX worker next to this script:");
+    console.error(jsxWorker);
+    process.exit(1);
+  }
+
+  if (!TARGET_LANGUAGE && CHECK_ONLY) {
+    throw new Error("Set AI_TARGET_LANGUAGE for a non-interactive Stage 3 readiness check.");
+  }
+  if (!TARGET_LANGUAGE) TARGET_LANGUAGE = await ask("Target language: ");
+  if (!TARGET_LANGUAGE || /[\r\n\0]/.test(TARGET_LANGUAGE)) {
+    console.error("A valid target language is required.");
+    process.exit(1);
+  }
+  if (!BOOK && CHECK_ONLY) {
+    throw new Error("Set AI_BOOK for a non-interactive Stage 3 readiness check.");
+  }
+  EDITORIAL_POLICY = editorialRules.resolveEditorialRules(TARGET_LANGUAGE, "diagram");
+  if (!BOOK) BOOK = await ask("Book code: ");
+  if (!BOOK || /[\r\n\0]/.test(BOOK)) {
+    console.error("A valid book code is required.");
+    process.exit(1);
+  }
+  GLOSSARY_RESOURCES = resolveDiagramGlossaryResources({
+    programRoot: PROGRAM_ROOT,
+    book: BOOK,
+    targetLanguage: TARGET_LANGUAGE,
+    glossaryProfile: GLOSSARY_PROFILE,
+  });
+  RESOURCE_HASHES = new Map([
+    GLOSSARY_RESOURCES.wordsJson, GLOSSARY_RESOURCES.acronymsJson, GLOSSARY_RESOURCES.symbolsWorkbook,
+  ].map(file => [file, hashFile(file)]));
+  SYMBOL_RUNTIME = buildAcronymSymbolsRuntime(
+    GLOSSARY_RESOURCES.symbolsWorkbook,
+    GLOSSARY_RESOURCES.targetLanguage,
+  );
+
+  if (LEDGER_REQUESTED) {
+    LEDGER_PATH = LEDGER_PATH || process.env.AI_DIAGRAM_LEDGER
+      || defaultLedgerPath(PROGRAM_ROOT, GLOSSARY_RESOURCES.book);
+    LEDGER = loadLedger(LEDGER_PATH, { book: GLOSSARY_RESOURCES.book });
+  }
+
+  assertChatGptLogin();
+  const modelResolution = await resolveSubscriptionModel();
+  MODEL = modelResolution.model;
+  if (CHECK_ONLY) {
+    console.log(
+      `DIAGRAM_SUBSCRIPTION_READY|model=${MODEL}|effort=${REASONING_EFFORT}|` +
+      `book=${GLOSSARY_RESOURCES.book}|language=${TARGET_LANGUAGE}|profile=${GLOSSARY_RESOURCES.glossaryProfile}|source=${sourceMode}`
+    );
+    if (LEDGER) {
+      const pending = LEDGER.diagrams.reduce(
+        (total, diagram) => total + (diagram.textUnits || []).filter(
+          (unit) => unit.kind === "prose" && !(unit.translations || {})[GLOSSARY_RESOURCES.targetLanguage]
+        ).length,
+        0,
+      );
+      console.log(
+        `DIAGRAM_LEDGER_READY|file=${LEDGER.filePath}|book=${LEDGER.book}|` +
+        `diagrams=${LEDGER.diagrams.length}|pendingUnits=${pending}|language=${GLOSSARY_RESOURCES.targetLanguage}`
+      );
+    }
+    return;
+  }
+
+  const inputFolder = await ask("Folder containing .ai files: ");
+  if (!inputFolder || !fs.existsSync(inputFolder)) {
+    console.error("Invalid folder.");
+    process.exit(1);
+  }
+
+  let illustratorExe = findIllustratorExe();
+  if (!illustratorExe) {
+    illustratorExe = await ask("Could not auto-find Illustrator.exe. Paste full path: ");
+  }
+  if (!illustratorExe || !fs.existsSync(illustratorExe)) {
+    console.error("Illustrator.exe not found.");
+    process.exit(1);
+  }
+
+  const aiFiles = (await listAiFiles(inputFolder)).sort();
+  if (!aiFiles.length) {
+    console.log("No .ai files found.");
+    return;
+  }
+
+  const selectedLedgerEntries = [];
+  if (LEDGER_REQUESTED) {
+    const ledgerIndex = indexByHash(LEDGER);
+    const unmatched = [];
+    for (const file of aiFiles) {
+      try {
+        selectedLedgerEntries.push(matchDiagram(LEDGER, file, ledgerIndex).entry);
+      } catch (error) {
+        unmatched.push(`${path.basename(file)}: ${error.message}`);
+      }
+    }
+    if (unmatched.length) {
+      throw new Error(
+        `The diagram ledger does not cover ${unmatched.length} of ${aiFiles.length} file(s). ` +
+        `Translate a pristine copy of the recorded source, or regenerate the ledger:\n${unmatched.join("\n")}`
+      );
+    }
+  }
+
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ai-open-sans-translate-"));
+  const resourceDir = path.join(tempRoot, "resources");
+  ensureDir(resourceDir);
+  GLOSSARY_RESOURCES.symbolsJson = path.join(resourceDir, "diagram-acronym-symbols.json");
+  writeJson(GLOSSARY_RESOURCES.symbolsJson, SYMBOL_RUNTIME);
+  RESOURCE_HASHES.set(GLOSSARY_RESOURCES.symbolsJson, hashFile(GLOSSARY_RESOURCES.symbolsJson));
+
+  const failureLogPath = makeFailureLogPath(tempRoot);
+  const sessionPaths = makeSessionPaths(tempRoot);
+
+  console.log("");
+  console.log("Illustrator:", illustratorExe);
+  console.log("Files:", aiFiles.length);
+  console.log("Model:", MODEL);
+  console.log("Reasoning effort:", REASONING_EFFORT);
+  console.log("Target language:", TARGET_LANGUAGE);
+  console.log("Book:", GLOSSARY_RESOURCES.book);
+  console.log("Diagram text source:", sourceMode);
+  console.log("Glossary profile:", GLOSSARY_RESOURCES.glossaryProfile);
+  if (LEDGER) {
+    console.log("Ledger:", LEDGER.filePath);
+    console.log("Ledger diagrams:", LEDGER.diagrams.length);
+  }
+  console.log("Failure log:", failureLogPath);
+  console.log("");
+
+  appendFailureLog(failureLogPath, [
+    "Illustrator Translate Diagrams Batch",
+    `Started: ${new Date().toISOString()}`,
+    `Input folder: ${inputFolder}`,
+    `Illustrator: ${illustratorExe}`,
+    `Files: ${aiFiles.length}`,
+    `Model: ${MODEL}`,
+    `Model policy: ${modelResolution.policy}`,
+    `Reasoning effort: ${REASONING_EFFORT}`,
+    `Target language: ${TARGET_LANGUAGE}`,
+    `Book: ${GLOSSARY_RESOURCES.book}`,
+    `Diagram text source: ${sourceMode}`,
+    `Glossary profile: ${GLOSSARY_RESOURCES.glossaryProfile}`,
+    `Ledger: ${LEDGER ? LEDGER.filePath : "not used"}`,
+    `Word glossary: ${GLOSSARY_RESOURCES.wordsJson}`,
+    `Acronym glossary: ${GLOSSARY_RESOURCES.acronymsJson}`,
+    ""
+  ]);
+
+  let session = null;
+  let successCount = 0;
+  let failureCount = 0;
+  const batchStarted = Date.now();
+
+  const getSession = () => session;
+  const setSession = (value) => { session = value; };
+
+  try {
+    if (LEDGER_REQUESTED) {
+      PREPARED_LEDGER_TRANSLATIONS = await prepareLedgerTranslations(selectedLedgerEntries, tempRoot);
+      // All translation queries complete before the single Adobe session starts.
+      await resolveSubscriptionModel(MODEL);
+    }
+    session = await startIllustratorSession({
+      illustratorExe,
+      controllerJsxPath: sessionPaths.controllerJsxPath,
+      jobsDir: sessionPaths.jobsDir,
+      jsxWorker,
+      readyJson: sessionPaths.readyJson,
+      stopJson: sessionPaths.stopJson,
+      sessionErrorJson: sessionPaths.sessionErrorJson,
+    });
+
+    for (let i = 0; i < aiFiles.length; i++) {
+      const aiFile = aiFiles[i];
+      console.log(`[${i + 1}/${aiFiles.length}] Processing: ${aiFile}`);
+
+      const ok = await processFileWithRetry({
+        aiFile,
+        illustratorExe,
+        jsxWorker,
+        sessionPaths,
+        getSession,
+        setSession,
+        tempRoot,
+        failureLogPath,
+        index: i,
+        total: aiFiles.length,
+      });
+
+      if (ok) successCount++;
+      else failureCount++;
+    }
+
+    console.log("");
+    console.log("Batch finished.");
+    console.log("Succeeded:", successCount);
+    console.log("Failed:", failureCount);
+    console.log("Failure log:", failureLogPath);
+
+    appendFailureLog(failureLogPath, [
+      `Finished: ${new Date().toISOString()}`,
+      `Succeeded: ${successCount}`,
+      `Failed: ${failureCount}`,
+      ""
+    ]);
+    assertBatchSucceeded(failureCount, aiFiles.length, failureLogPath);
+  } finally {
+    try {
+      writeJson(path.join(tempRoot, "performance.json"), { ...PERFORMANCE, sourceMode, elapsedMs: Date.now() - batchStarted });
+      console.log(`DIAGRAM_BATCH_PERFORMANCE|queries=${PERFORMANCE.modelQueries}|promptCharacters=${PERFORMANCE.promptCharacters}|elapsedMs=${Date.now() - batchStarted}`);
+    } catch {
+      console.warn("Could not save the performance summary; controller shutdown will still proceed.");
+    }
+    try {
+      writeJson(sessionPaths.stopJson, {
+        stop: true,
+        ts: new Date().toISOString()
+      });
+    } catch {}
+
+    if (session && session.child && !session.state.exited) {
+      await Promise.race([
+        session.completion.catch(() => {}),
+        sleep(5000)
+      ]);
+
+      // Stop our controller without terminating the user's desktop application.
+      session.child.unref();
+    }
+  }
+}
+
+module.exports = { assertBatchSucceeded, parseDiagramArguments, chooseDiagramTextSource, ask };
+
+if (require.main === module) {
+  main().catch((err) => {
+    console.error("Fatal error:");
+    console.error(err);
+    process.exitCode = 1;
+  });
+}

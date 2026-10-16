@@ -1,0 +1,410 @@
+"use strict";
+
+const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const { spawnSync } = require("node:child_process");
+const test = require("node:test");
+const { pathToFileURL } = require("node:url");
+const ExcelJS = require("exceljs");
+const XLSX = require("xlsx");
+
+const ROOT = path.resolve(__dirname, "..");
+const diagramResources = require(path.join(
+  ROOT, "03 Translate Diagrams", "Code", "DiagramResources.cjs",
+));
+
+function sha256(filePath) {
+  return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex").toUpperCase();
+}
+
+function writeWorkbook(filePath, rows) {
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(rows), "Content");
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  XLSX.writeFile(workbook, filePath, { compression: true, bookSST: true });
+}
+
+test("Stage 3 discovers diagrams recursively and resolves canonical glossary resources", async () => {
+  const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "translate-diagrams-"));
+  try {
+    const folder = path.join(fixtureRoot, "diagrams");
+    const nested = path.join(folder, "nested", "deeper");
+    fs.mkdirSync(nested, { recursive: true });
+    fs.writeFileSync(path.join(folder, "root.ai"), "fixture", "utf8");
+    fs.writeFileSync(path.join(nested, "nested.ai"), "fixture", "utf8");
+    fs.writeFileSync(path.join(nested, "upper.AI"), "fixture", "utf8");
+    fs.writeFileSync(path.join(nested, "ignored.ai.txt"), "fixture", "utf8");
+    const files = await diagramResources.listAiFiles(folder);
+    assert.deepEqual(files.map((filePath) => path.relative(folder, filePath).replace(/\\/g, "/")), [
+      "nested/deeper/nested.ai",
+      "nested/deeper/upper.AI",
+      "root.ai",
+    ]);
+
+    const glossaryRoot = path.join(fixtureRoot, "01 Translate Glossaries", "Demo", "Runtime");
+    fs.mkdirSync(glossaryRoot, { recursive: true });
+    fs.writeFileSync(path.join(glossaryRoot, "words.json"), `${JSON.stringify({
+      Example: {
+        "French Recommended": "Exemple",
+        "French Recommended Definition": "Terme de démonstration",
+      },
+    }, null, 2)}\n`, "utf8");
+    fs.writeFileSync(path.join(glossaryRoot, "acronyms.json"), `${JSON.stringify({
+      EX: {
+        "French Recommended": "EX",
+        "French Recommended Definition": "Exemple",
+      },
+    }, null, 2)}\n`, "utf8");
+    fs.writeFileSync(
+      path.join(fixtureRoot, "01 Translate Glossaries", "book_glossary_map.json"),
+      `${JSON.stringify({
+        schemaVersion: 1,
+        profiles: {
+          "French Recommended": {
+            language: "French",
+            termKey: "French Recommended",
+            definitionKey: "French Recommended Definition",
+          },
+        },
+        books: {
+          DEMO: {
+            family: "Demo",
+            runtime: {
+              acronyms: "01 Translate Glossaries/Demo/Runtime/acronyms.json",
+              words: "01 Translate Glossaries/Demo/Runtime/words.json",
+            },
+            supportedProfiles: ["French Recommended"],
+            defaultProfiles: { French: "French Recommended" },
+          },
+        },
+      }, null, 2)}\n`,
+      "utf8",
+    );
+    const symbolsWorkbook = path.join(
+      fixtureRoot, "03 Translate Diagrams", "Reference", "New Acronyms Symbols.xlsx",
+    );
+    writeWorkbook(symbolsWorkbook, [
+      ["English", "English Definition", "French", "French Definition", "Portuguese", "Portuguese Definition"],
+      ["A1", "Example symbol", "A1", "Symbole d’exemple", "AE1", "Símbolo de exemplo"],
+    ]);
+
+    const resources = diagramResources.resolveDiagramGlossaryResources({
+      programRoot: fixtureRoot,
+      book: "demo",
+      targetLanguage: "French",
+    });
+    assert.equal(resources.book, "DEMO");
+    assert.equal(resources.glossaryProfile, "French Recommended");
+    assert.equal(resources.glossaryTermKey, "French Recommended");
+    assert.ok(fs.existsSync(resources.wordsJson));
+    assert.ok(fs.existsSync(resources.acronymsJson));
+    const symbols = diagramResources.buildAcronymSymbolsRuntime(resources.symbolsWorkbook, "French");
+    assert.equal(symbols.A1.French, "A1");
+    assert.equal(symbols.A1.Portuguese, "AE1");
+  } finally {
+    fs.rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test("Stage 3 and Stage 4 contain no paid API client or hard-coded gpt-5.5 model", () => {
+  const files = [
+    path.join(ROOT, "03 Translate Diagrams", "Code", "Illustrator_Translate_Diagrams_Batch.cjs"),
+    path.join(ROOT, "04 Translate Comic Captions", "Code", "Translate_Comic_Captions.js"),
+  ];
+  for (const filePath of files) {
+    const source = fs.readFileSync(filePath, "utf8");
+    assert.doesNotMatch(source, /gpt-5\.5/i, filePath);
+    assert.doesNotMatch(source, /api\.openai\.com|new\s+OpenAI|responses\.create|chat\.completions/i, filePath);
+    assert.match(source, /Codex subscription|CodexSubscription|codex/i, filePath);
+  }
+});
+
+test("Stage 3 reports a failed diagram batch as a failed process outcome", () => {
+  const batch = require(path.join(
+    ROOT, "03 Translate Diagrams", "Code", "Illustrator_Translate_Diagrams_Batch.cjs",
+  ));
+  assert.doesNotThrow(() => batch.assertBatchSucceeded(0, 4, "failure.log"));
+  assert.throws(
+    () => batch.assertBatchSucceeded(1, 4, "failure.log"),
+    /completed with 1 failed diagram.*failure\.log/i,
+  );
+  assert.throws(
+    () => batch.assertBatchSucceeded(5, 4, "failure.log"),
+    /Invalid Stage 3 batch totals/,
+  );
+});
+
+test("Stage 4 mutates only pending Portuguese cells", async () => {
+  const captionModule = await import(pathToFileURL(path.join(
+    ROOT, "04 Translate Comic Captions", "Code", "CaptionWorkbook.mjs",
+  )).href);
+  const headers = [
+    "Image",
+    "English Caption",
+    "Spanish Description",
+    "French Description",
+    "Portuguese Description",
+    "German Description",
+  ];
+  const workbook = new ExcelJS.Workbook();
+  const worksheet = workbook.addWorksheet("Captions");
+  worksheet.addRow(headers);
+  worksheet.addRow(["image-1", "English", "Spanish", "French", "", "German"]);
+  worksheet.addRow(["image-2", "Already done", "Spanish 2", "French 2", "Português", "German 2"]);
+  worksheet.getCell("B2").font = { bold: true, name: "Arial" };
+  worksheet.getCell("E2").fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFFF00" } };
+  const before = JSON.parse(JSON.stringify(worksheet.model));
+  const state = captionModule.readCaptionWorksheetState(worksheet, headers);
+  assert.deepEqual(state.pending.map((row) => row.id), ["row_000002"]);
+  const translations = new Map([["row_000002", "Português novo"]]);
+  captionModule.applyPortugueseTranslations(worksheet, state.pending, translations);
+  captionModule.assertOnlyPortugueseValuesChanged(worksheet, state.sourceSnapshot, translations);
+  assert.equal(worksheet.getCell("E2").value, "Português novo");
+  assert.equal(worksheet.getCell("E3").value, "Português");
+  assert.deepEqual(worksheet.getCell("B2").font, { bold: true, name: "Arial" });
+  assert.deepEqual(worksheet.getCell("E2").fill, { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFFF00" } });
+  const after = JSON.parse(JSON.stringify(worksheet.model));
+  for (let row = 0; row < before.rows.length; row += 1) {
+    for (let column = 0; column < before.rows[row].cells.length; column += 1) {
+      if (row === 1 && column === 4) continue;
+      assert.deepEqual(after.rows[row].cells[column], before.rows[row].cells[column]);
+    }
+  }
+});
+
+test("QA revalidates edited workbooks but invalidates old import and finalization evidence", () => {
+  const job = fs.mkdtempSync(path.join(os.tmpdir(), "translate-imported-qa-"));
+  try {
+    const headers = [
+      "ParagraphStyleRange id",
+      "ParagraphStyleRange content",
+      "Content tag",
+      "Content content",
+    ];
+    const inputPath = path.join(job, "input", "content_export.xlsx");
+    const outputPath = path.join(job, "output", "content_import.xlsx");
+    writeWorkbook(inputPath, [headers, ["Body", "Source", "id-1", "Source"]]);
+    writeWorkbook(outputPath, [headers, ["Body", "Cible", "id-1", "Cible"]]);
+    const importedHash = sha256(outputPath);
+    fs.writeFileSync(path.join(job, "job_config.json"), `${JSON.stringify({
+      schemaVersion: 2,
+      jobId: "fixture",
+      jobPath: job,
+      book: "SUT",
+      targetLanguage: "French",
+      glossaryProfile: "French",
+    }, null, 2)}\n`, "utf8");
+    fs.writeFileSync(path.join(job, "job_manifest.json"), `${JSON.stringify({
+      schemaVersion: 2,
+      jobId: "fixture",
+      status: "imported",
+      workbook: { dataRowCount: 1, contentIdCount: 1 },
+      qa: { status: "passed", hashes: { outputWorkbookSha256: importedHash } },
+      import: { workbookSha256: importedHash },
+      layoutFinalization: { documentSha256: "old-document" },
+    }, null, 2)}\n`, "utf8");
+    writeWorkbook(outputPath, [headers, ["Body", "Modifié", "id-1", "Modifié"]]);
+    const validator = path.join(
+      ROOT, "02 Translate Text", "Code", "Validation", "Validate_Translation_Job.js",
+    );
+    const run = spawnSync(process.execPath, [validator, "--job", job], {
+      cwd: ROOT,
+      encoding: "utf8",
+      windowsHide: true,
+    });
+    assert.equal(run.status, 0, run.stderr);
+    let manifest = JSON.parse(fs.readFileSync(path.join(job, "job_manifest.json")));
+    assert.equal(manifest.status, "ready_for_import");
+    assert.equal(manifest.qa.hashes.outputWorkbookSha256, sha256(outputPath));
+    assert.equal(manifest.import, undefined);
+    assert.equal(manifest.layoutFinalization, undefined);
+    assert.equal(manifest.invalidatedImport.import.workbookSha256, importedHash);
+    assert.equal(manifest.invalidatedImport.layoutFinalization.documentSha256, "old-document");
+    manifest.status = "imported";
+    manifest.import = { workbookSha256: sha256(outputPath), payloadSha256: manifest.qa.hashes.importPayloadSha256 };
+    fs.writeFileSync(path.join(job, "job_manifest.json"), JSON.stringify(manifest));
+    const unchanged = spawnSync(process.execPath, [validator, "--job", job], { cwd: ROOT, encoding: "utf8", windowsHide: true });
+    assert.equal(unchanged.status, 0, unchanged.stderr);
+    manifest = JSON.parse(fs.readFileSync(path.join(job, "job_manifest.json")));
+    assert.equal(manifest.status, "imported", "the exact already-imported payload remains resumable");
+    writeWorkbook(outputPath, [headers, ["Body", "", "id-1", ""]]);
+    const invalid = spawnSync(process.execPath, [validator, "--job", job], { cwd: ROOT, encoding: "utf8", windowsHide: true });
+    assert.notEqual(invalid.status, 0);
+    manifest = JSON.parse(fs.readFileSync(path.join(job, "job_manifest.json")));
+    assert.equal(manifest.status, "qa_failed");
+    assert.equal(manifest.import, undefined, "a failed edited workbook cannot retain imported status");
+  } finally {
+    fs.rmSync(job, { recursive: true, force: true });
+  }
+});
+
+test("journaled re-import accepts the exact previous output but never overwrites later ICML edits", async () => {
+  const job = fs.mkdtempSync(path.join(os.tmpdir(), "translate-reimport-"));
+  try {
+    const { fnv1a32Utf16 } = await import(pathToFileURL(path.join(ROOT, "02 Translate Text/Code/ContentFingerprint.mjs")).href);
+    const workspace = path.join(job, "edition"), textFolder = path.join(workspace, "Text");
+    fs.mkdirSync(textFolder, { recursive: true });
+    const icml = path.join(textFolder, "story.icml");
+    const original = '<ParagraphStyleRange id="p1"><Content id="id-1">Source</Content></ParagraphStyleRange>';
+    fs.writeFileSync(icml, original);
+    const headers = ["ParagraphStyleRange id", "ParagraphStyleRange content", "Content tag", "Content content"];
+    const output = path.join(job, "output/content_import.xlsx");
+    writeWorkbook(path.join(job, "input/content_export.xlsx"), [headers, ["p1", "Source", "id-1", "Source"]]);
+    writeWorkbook(output, [headers, ["p1", "Cible", "id-1", "Cible"]]);
+    fs.writeFileSync(path.join(job, "job_config.json"), JSON.stringify({
+      jobId: "fixture", jobPath: job, book: "DEMO", targetLanguage: "French", paths: { outputWorkbook: output },
+      productionWorkspace: { root: workspace, textFolder, documentPath: path.join(workspace, "book.indd") },
+    }));
+    fs.writeFileSync(path.join(job, "job_manifest.json"), JSON.stringify({
+      jobId: "fixture", status: "translated", workbook: { dataRowCount: 1, contentIdCount: 1 },
+      icmlFiles: [{ path: icml, sha256: sha256(icml), fingerprint: fnv1a32Utf16(original) }],
+    }));
+    function run(name) {
+      return spawnSync(process.execPath, [path.join(ROOT, "02 Translate Text/Code", name), "--job", job], { cwd: ROOT, encoding: "utf8", windowsHide: true });
+    }
+    for (const target of ["Cible", "Corrigé"]) {
+      writeWorkbook(output, [headers, ["p1", target, "id-1", target]]);
+      const qa = run("Validation/Validate_Translation_Job.js");
+      assert.equal(qa.status, 0, qa.stderr);
+      const manifestFile=path.join(job,"job_manifest.json");
+      const qaManifest=JSON.parse(fs.readFileSync(manifestFile,"utf8"));
+      assert.match(qaManifest.qa.editorialRules.sha256,/^[A-F0-9]{64}$/);
+      const tampered=structuredClone(qaManifest);
+      tampered.qa.editorialRules.sha256="0".repeat(64);
+      fs.writeFileSync(manifestFile,JSON.stringify(tampered));
+      assert.match(run("Import_Translation_Workbook.mjs").stderr,/current editorial rules/);
+      fs.writeFileSync(manifestFile,JSON.stringify(qaManifest));
+      const imported = run("Import_Translation_Workbook.mjs");
+      assert.equal(imported.status, 0, imported.stderr);
+      assert.ok(fs.readFileSync(icml, "utf8").includes(`>${target}</Content>`));
+    }
+    const userEdit = fs.readFileSync(icml, "utf8").replace("Corrigé", "User edit");
+    fs.writeFileSync(icml, userEdit);
+    writeWorkbook(output, [headers, ["p1", "Nouvelle cible", "id-1", "Nouvelle cible"]]);
+    const changedSourceQa=run("Validation/Validate_Translation_Job.js");
+    assert.notEqual(changedSourceQa.status, 0, 'QA must not infer panel-managed caches from changed ICML');
+    assert.match(changedSourceQa.stderr,/ICML changed since the last accepted export\/import/);
+    const blocked = run("Import_Translation_Workbook.mjs");
+    assert.notEqual(blocked.status, 0);
+    assert.match(blocked.stderr, /ready_for_import|workbook|QA|previous import/i);
+    assert.equal(fs.readFileSync(icml, "utf8"), userEdit);
+  } finally {
+    fs.rmSync(job, { recursive: true, force: true });
+  }
+});
+
+test("offline ICML import runs GREP across segments, preserves BOM, refuses locks and verifies exact output", async () => {
+  const job = fs.mkdtempSync(path.join(os.tmpdir(), "translate-icml-grep-"));
+  try {
+    const { fnv1a32Utf16 } = await import(pathToFileURL(path.join(ROOT, "02 Translate Text/Code/ContentFingerprint.mjs")).href);
+    const workspace = path.join(job,"edition"), textFolder = path.join(workspace,"Text");
+    fs.mkdirSync(textFolder,{recursive:true});
+    const icml = path.join(textFolder,"story.icml"), second = path.join(textFolder,"second.icml");
+    const original = '<ParagraphStyleRange id="p1"><CharacterStyleRange><Content id="id-1">12 </Content></CharacterStyleRange><CharacterStyleRange><Content id="id-2">km</Content></CharacterStyleRange></ParagraphStyleRange>';
+    const other = '<ParagraphStyleRange id="p2"><Content id="id-3">Source</Content></ParagraphStyleRange>';
+    fs.writeFileSync(icml,'\uFEFF'+original); fs.writeFileSync(second,other);
+    const headers = ["ParagraphStyleRange id", "ParagraphStyleRange content", "Content tag", "Content content"];
+    const output = path.join(job,"output/content_import.xlsx");
+    const rows = [headers,["p1","12 km","id-1","12 "],["","","id-2","km"],["p2","Source","id-3","Source"]];
+    writeWorkbook(path.join(job,"input/content_export.xlsx"), rows);
+    writeWorkbook(output, [...rows.slice(0,3),["p2","Cible","id-3","Cible"]]);
+    fs.writeFileSync(path.join(job,"job_config.json"),JSON.stringify({jobId:"fixture",jobPath:job,book:"DEMO",targetLanguage:"French",paths:{outputWorkbook:output},productionWorkspace:{root:workspace,textFolder,documentPath:path.join(workspace,"book.indd")}}));
+    fs.writeFileSync(path.join(job,"job_manifest.json"),JSON.stringify({jobId:"fixture",status:"translated",workbook:{dataRowCount:3,contentIdCount:3},icmlFiles:[{path:icml,sha256:crypto.createHash("sha256").update(original).digest("hex").toUpperCase(),fingerprint:fnv1a32Utf16(original)},{path:second,sha256:sha256(second),fingerprint:fnv1a32Utf16(other)}]}));
+    const run = (name, extra=[]) => spawnSync(process.execPath,[path.join(ROOT,"02 Translate Text/Code",name),"--job",job,...extra],{cwd:ROOT,encoding:"utf8",windowsHide:true});
+    assert.equal(run("Validation/Validate_Translation_Job.js").status,0);
+    const before = fs.readFileSync(icml), workbookHash = sha256(output);
+    assert.equal(run("Import_Translation_Workbook.mjs",["--dry-run"]).status,0);
+    assert.deepEqual(fs.readFileSync(icml),before);
+    const lock = path.join(workspace,"book.idlk"); fs.writeFileSync(lock,"");
+    const blocked = run("Import_Translation_Workbook.mjs");
+    assert.notEqual(blocked.status,0); assert.match(blocked.stderr,/lock found/);
+    assert.deepEqual(fs.readFileSync(icml),before); fs.unlinkSync(lock);
+    const imported = run("Import_Translation_Workbook.mjs"); assert.equal(imported.status,0,imported.stderr);
+    assert.equal(fs.readFileSync(icml,"utf8"),'\uFEFF'+original.replace('12 ','12\u00a0'));
+    assert.equal(sha256(output),workbookHash,"approved workbook is not silently rewritten");
+    const manifest = JSON.parse(fs.readFileSync(path.join(job,"job_manifest.json"),"utf8"));
+    assert.equal(manifest.import.grep.files.length,2);
+    assert.equal(manifest.import.grep.files[0].records.length,8);
+    assert.equal(manifest.import.grep.files[1].records.every(r=>r.changes===0),true);
+    assert.equal(fs.existsSync(path.join(job,"state/content_import_transaction.json")),false);
+    const verified = run("IcmlGrepJob.mjs"); assert.equal(verified.status,0,verified.stderr);
+    const configFile=path.join(job,"job_config.json"), config=JSON.parse(fs.readFileSync(configFile));
+    config.protectedSourceRules={ paragraphStyleName:"ReviewProtected" };
+    fs.writeFileSync(configFile,JSON.stringify(config));
+    const protectionQa=run("Validation/Validate_Translation_Job.js"); assert.equal(protectionQa.status,0,protectionQa.stderr);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(job,"job_manifest.json"))).status,"ready_for_import","a changed protection scope must invalidate the import even with identical workbook bytes");
+    assert.equal(run("Import_Translation_Workbook.mjs").status,0);
+    delete config.protectedSourceRules;
+    fs.writeFileSync(configFile,JSON.stringify(config));
+    // Existing jobs can acquire the new evidence without manual manifest resets.
+    delete manifest.import.grep;
+    fs.writeFileSync(path.join(job,"job_manifest.json"),JSON.stringify(manifest));
+    const renewedQa=run("Validation/Validate_Translation_Job.js"); assert.equal(renewedQa.status,0,renewedQa.stderr);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(job,"job_manifest.json"))).status,"ready_for_import");
+    const renewedImport=run("Import_Translation_Workbook.mjs"); assert.equal(renewedImport.status,0,renewedImport.stderr);
+    assert.equal(run("IcmlGrepJob.mjs").status,0);
+    fs.writeFileSync(second,fs.readFileSync(second,"utf8").replace("Cible","User edit"));
+    assert.match(run("IcmlGrepJob.mjs").stderr,/ICML changed after import/);
+  } finally { fs.rmSync(job,{recursive:true,force:true}); }
+});
+
+test("ICML GREP evidence accepts the current engine and listed equivalent prior engines only", async () => {
+  const jobModule = await import(pathToFileURL(path.join(ROOT, "02 Translate Text/Code/IcmlGrepJob.mjs")).href);
+  const current = jobModule.engineSha256();
+  const prior = "2EE2E561AE77A09BFA75A6A5D5BC5BF44F4C15DDF2A985FF2E002DA8AEB37AC5";
+  assert.equal(current, sha256(path.join(ROOT, "Code/IcmlGrep.cjs")));
+  assert.deepEqual([...jobModule.EQUIVALENT_PRIOR_ENGINE_SHA256], [prior]);
+  assert.ok(Object.isFrozen(jobModule.EQUIVALENT_PRIOR_ENGINE_SHA256));
+  assert.equal(jobModule.isAcceptedEngineSha256(current), true);
+  assert.equal(jobModule.isAcceptedEngineSha256(prior), true);
+  for (const unknown of ["0".repeat(64), prior.toLowerCase(), "", undefined, null, [prior]]) {
+    assert.equal(jobModule.isAcceptedEngineSha256(unknown), false);
+  }
+
+  const job = fs.mkdtempSync(path.join(os.tmpdir(), "translate-icml-engine-"));
+  try {
+    const { fnv1a32Utf16 } = await import(pathToFileURL(path.join(ROOT, "02 Translate Text/Code/ContentFingerprint.mjs")).href);
+    const workspace = path.join(job,"edition"), textFolder = path.join(workspace,"Text");
+    fs.mkdirSync(textFolder,{recursive:true});
+    const icml = path.join(textFolder,"story.icml");
+    const original = '<ParagraphStyleRange id="p1"><CharacterStyleRange><Content id="id-1">12 </Content></CharacterStyleRange><CharacterStyleRange><Content id="id-2">km</Content></CharacterStyleRange></ParagraphStyleRange>';
+    fs.writeFileSync(icml,original);
+    const headers = ["ParagraphStyleRange id", "ParagraphStyleRange content", "Content tag", "Content content"];
+    const output = path.join(job,"output/content_import.xlsx");
+    const rows = [headers,["p1","12 km","id-1","12 "],["","","id-2","km"]];
+    writeWorkbook(path.join(job,"input/content_export.xlsx"), rows);
+    writeWorkbook(output, rows);
+    fs.writeFileSync(path.join(job,"job_config.json"),JSON.stringify({jobId:"fixture",jobPath:job,book:"DEMO",targetLanguage:"French",paths:{outputWorkbook:output},productionWorkspace:{root:workspace,textFolder,documentPath:path.join(workspace,"book.indd")}}));
+    fs.writeFileSync(path.join(job,"job_manifest.json"),JSON.stringify({jobId:"fixture",status:"translated",workbook:{dataRowCount:2,contentIdCount:2},icmlFiles:[{path:icml,sha256:crypto.createHash("sha256").update(original).digest("hex").toUpperCase(),fingerprint:fnv1a32Utf16(original)}]}));
+    const run = name => spawnSync(process.execPath,[path.join(ROOT,"02 Translate Text/Code",name),"--job",job],{cwd:ROOT,encoding:"utf8",windowsHide:true});
+    assert.equal(run("Validation/Validate_Translation_Job.js").status,0);
+    const imported = run("Import_Translation_Workbook.mjs"); assert.equal(imported.status,0,imported.stderr);
+    const manifestFile = path.join(job,"job_manifest.json");
+    const manifest = JSON.parse(fs.readFileSync(manifestFile,"utf8"));
+    assert.equal(manifest.import.grep.engineSha256, current, "new imports record the current engine");
+    const withEngine = value => {
+      const next = structuredClone(manifest); next.import.grep.engineSha256 = value;
+      fs.writeFileSync(manifestFile,JSON.stringify(next));
+    };
+    for (const accepted of [current, prior]) {
+      withEngine(accepted);
+      const verified = run("IcmlGrepJob.mjs"); assert.equal(verified.status,0,verified.stderr);
+      const qa = run("Validation/Validate_Translation_Job.js"); assert.equal(qa.status,0,qa.stderr);
+      const after = JSON.parse(fs.readFileSync(manifestFile,"utf8"));
+      assert.equal(after.status,"imported","equivalent engine evidence keeps the import current");
+      assert.equal(after.import.grep.engineSha256,accepted);
+    }
+    withEngine("0".repeat(64));
+    const rejected = run("IcmlGrepJob.mjs");
+    assert.notEqual(rejected.status,0);
+    assert.match(rejected.stderr,/Current offline ICML GREP import evidence is missing/);
+    const invalidated = run("Validation/Validate_Translation_Job.js"); assert.equal(invalidated.status,0,invalidated.stderr);
+    const after = JSON.parse(fs.readFileSync(manifestFile,"utf8"));
+    assert.equal(after.status,"ready_for_import","an unknown engine hash invalidates the import");
+    assert.equal(after.import,undefined);
+    assert.equal(after.invalidatedImport.import.grep.engineSha256,"0".repeat(64));
+  } finally { fs.rmSync(job,{recursive:true,force:true}); }
+});

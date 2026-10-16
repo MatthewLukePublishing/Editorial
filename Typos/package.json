@@ -1,0 +1,25 @@
+{
+  "name": "@matthew-luke-publishing/typo-checker",
+  "version": "1.4.0",
+  "description": "Subscription-only typo and translation consistency checking with the official Codex CLI.",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "node ./Run_Self_Tests.js",
+    "check": "node --check ./Typo_Checker.js && node --check ./Typo_Checker_Batch.js && node --check ./Compare_5_Columns.js && node --check \"./5_Columns Rechecker.js\" && node --check ./Style_Guide_Checker.js && node --check ./Subscription_Harness.js && node --check ./Resolve-LatestSubscriptionModel.mjs && node --check ./Live_Model_Policy.test.cjs && node --check ./EditorialPolicy.cjs && node --check ./Translation_Rules.js && node --check ./Translation_Rules.test.cjs"
+  },
+  "keywords": [
+    "codex",
+    "proofreading",
+    "translation",
+    "xlsx"
+  ],
+  "author": "Matthew Luke Publishing LLC",
+  "license": "MIT",
+  "dependencies": {
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
+  }
+}

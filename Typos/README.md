@@ -1,0 +1,281 @@
+# Typo Checker
+
+Typo Checker exports text from the one saved document open in Adobe InDesign,
+reviews it through the official Codex CLI and a ChatGPT subscription, and writes
+an Excel corrections report. Its public launcher downloads a fresh copy of the
+latest stable GitHub release for every run. It is designed to fail closed: it
+never uses an OpenAI API key, never falls back to the paid API, and never silently
+selects an older model or stale program release.
+
+The primary workflow checks every text item twice. For every query it:
+
+- freshly queries OpenAI's live model metadata and identifies its one official
+  frontier model;
+- freshly queries the signed-in account's live Codex catalog and requires that
+  exact model to be visible, current, and compatible with `xhigh`;
+- records the exact model, resolution time, Codex client version, source URLs,
+  and both metadata hashes in the job record;
+- repeats both uncached checks immediately before every query, retry, and
+  recheck;
+- uses independent `xhigh` reasoning for the primary review and recheck;
+- stops if model resolution fails, the configured model is outdated, or the
+  official frontier changes during the job; and
+- requires Codex CLI authentication through ChatGPT, with API credentials stripped
+  from every child process.
+
+The shared authority is `Resolve-LatestSubscriptionModel.mjs`, adapted from the
+Translation Pipeline resolver. A saved resolution is evidence only and is never
+used for a later query. If either live request fails, the latest model changes,
+the account cannot use it, or `xhigh` is unavailable, no model query is sent.
+
+## Requirements
+
+- Windows 10 or Windows 11
+- Node.js 24 or newer
+- The shared Book Standards installation, configured with `BOOK_STANDARDS_HOME`
+  when it is not at `../Book Standards`.
+- Adobe InDesign 2026 for the open-document workflow
+- The official [Codex CLI](https://learn.chatgpt.com/docs/codex/cli), signed in with
+  **Sign in with ChatGPT**
+- A ChatGPT plan with access to Codex
+- Microsoft Excel or another application that can open `.xlsx` files
+- Internet access while a review is running
+
+The standalone workbook tools do not require InDesign.
+
+## Open InDesign and run the latest release
+
+1. Open exactly one `.indd` document in InDesign 2026.
+2. Save it and leave it open with no unsaved changes.
+3. Ask Codex/ChatGPT to follow the copy-paste instructions in
+   [`CHATGPT_PROMPT.md`](CHATGPT_PROMPT.md), specifying the language to check.
+
+If `Run_Latest_Typo_Checker.ps1` is already available locally, the direct command
+is:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\Run_Latest_Typo_Checker.ps1 -Language German -Background
+```
+
+The recommended `-Background` mode starts a hidden, noninteractive PowerShell
+worker and returns immediately, so other applications remain usable. It returns
+`ProcessId`, `StdoutPath`, `StderrPath` and `StatusPath`. Progress and errors are
+saved under `typo_checks/launcher_runs` beside the launcher. Read those files as
+UTF-8; `status.json` records `Running`, then `Succeeded` or `Failed` and the
+worker exit code. Launching successfully does not mean the review has finished.
+Wait for completion before starting another InDesign operation. Omit
+`-Background` to run synchronously with console output for troubleshooting.
+
+The launcher does not trust or execute a previously downloaded checker. On every
+run it:
+
+- queries the canonical repository's latest stable release;
+- resolves the release tag to an immutable 40-character commit SHA;
+- downloads that exact commit into a new temporary folder;
+- verifies the archive structure, package version, bundled exporter, and offline
+  self-tests;
+- rechecks the latest release immediately before starting the checker; and
+- records the release tag, commit SHA, and downloaded archive SHA-256 in the job.
+
+If the latest release cannot be resolved or changes during preparation, the run
+stops. Only the temporary program download is removed afterward. The generated
+job and report files remain under this folder beside the open document:
+
+```text
+typo_checks\<run-id>\
+  input\content_export.xlsx
+  reports\content_export_corrections.xlsx
+  reports\content_export_corrections.xlsx.job.json
+```
+
+No Excel input file is stored in or downloaded from GitHub. The bundled, hash-
+verified InDesign exporter creates `content_export.xlsx` locally from the open
+document during each run. The controller does not save, close, or modify a
+document that was already open.
+
+No `.env` file, API key, or OpenAI API billing account is used by this program.
+Run `codex` once and choose **Sign in with ChatGPT** if the CLI is not already
+authenticated.
+
+## Download for standalone workbook use
+
+Download and extract the latest Editorial release ZIP, keep the complete layout,
+and open its `Typos` directory. The executable checker files are
+bundled; `npm install` is needed only when developing or rebuilding the project.
+
+## Quick start: check one Excel column
+
+Create an `.xlsx` workbook containing the text to review in column A. Do not add a
+header row or populate any other column. Then run:
+
+```powershell
+$env:INPUT_XLSX = "C:\path\to\input.xlsx"
+$env:OUTPUT_XLSX = "C:\path\to\typo_review.xlsx"
+node .\Typo_Checker_Batch.js
+Remove-Item Env:INPUT_XLSX, Env:OUTPUT_XLSX
+```
+
+The output has three headerless columns:
+
+1. original text;
+2. corrected text; and
+3. the independent recheck note.
+
+As the final workbook-formatting step, every changed word or punctuation segment
+is highlighted inside its paragraph: the original form is bold, red, and
+underlined, while the corrected form is bold and green. Unchanged surrounding
+text remains normally formatted, so each correction can be located without
+comparing two entire paragraphs manually. The same highlighting is applied to
+the `Original content` and `Corrected content` columns in InDesign reports.
+
+A JSON job record is written beside the output workbook. It contains hashes,
+query evidence, the model policy, and the exact model used. Input, output, and job
+record paths must be different.
+
+Optional settings are supplied as PowerShell environment variables before the
+command:
+
+```powershell
+$env:CHECK_LANGUAGE = "German"
+$env:ROW_LIMIT = "20"
+$env:CODEX_QUERY_TIMEOUT_MS = "1800000"
+```
+
+`OPENAI_MODEL` may be set only as a guardrail. If it is not the current official
+frontier, the run stops instead of substituting another model.
+
+## Other workbook workflows
+
+- `Compare_5_Columns.js` compares exactly five translations per headerless row and
+  writes a note for each target.
+- `5_Columns Rechecker.js` independently rechecks the nontrivial comparison notes
+  and verifies the source workbook and comparison-output hashes.
+- `Style_Guide_Checker.js` checks headerless column-A text against the embedded
+  style requirements from the shared Book Standards database.
+- `Subscription_Harness.js` is the shared ChatGPT-subscription execution boundary
+  for those three helper workflows.
+
+Each script is configured with environment variables declared near the beginning
+of the file. It rejects unexpected extra columns instead of silently discarding
+them.
+
+## Editable translation and proofreading rules
+
+The shared `Book Standards.sqlite` database contains the original workbook
+transcription and the active house-style policy for ten languages.
+Both primary proofreading and independent recheck accept proven violations of
+these rules, including number style (one through one hundred), units, dates,
+acronyms, punctuation, hyphens and wording. The helper workflows load the same
+policy through `Subscription_Harness.js`; the style checker defaults to English
+unless `CHECK_LANGUAGE` is set. Comparison workflows apply each text's language.
+Language conventions and protected quotations, glossary terms, official names,
+codes and exact specifications take precedence over generic English advice.
+
+Typos and Translate both load the shared database through the Book Standards
+`EditorialPolicy.cjs` reader. Edit active rules in its `editorial_rule` table
+and language settings in `editorial_language`, following the Book Standards
+README. The embedded source documents are immutable import evidence.
+No local rule snapshot or fallback is retained. Local installations outside the
+standard sibling layout must set `BOOK_STANDARDS_HOME`. The release launcher
+always uses the shared reader and database from its verified Editorial download.
+
+Every review records the exact rules path, version and SHA-256 and rechecks it
+before each query and completion. Missing, malformed or changed rules stop the
+job. Restart after editing rules. Text-only reports cannot verify paragraph
+styles, layers, image stacking or TOC numbering; those remain translation-layout
+checks. Correction highlighting is applied after the editorial review/recheck.
+
+## Translation-job InDesign workflow
+
+In addition to the public one-open-document launcher, `Typo_Checker.js` retains
+the internal production workflow. It opens only the production INDD recorded in
+an active-job JSON file, creates an isolated export, checks every exported
+paragraph, performs the mandatory recheck, and writes a new report workbook and
+JSON job record.
+
+The distribution includes `Export All Content to Excel.jsx`, the exact exporter
+whose SHA-256 is verified before each run. To use a non-default active-job file:
+
+```powershell
+$env:ACTIVE_JOB_CONFIG_PATH = "C:\path\to\Active Job.json"
+node .\Typo_Checker.js
+Remove-Item Env:ACTIVE_JOB_CONFIG_PATH
+```
+
+In unattended translation-job mode, InDesign must have no open documents. For a
+deliberate test against the one configured document already open in InDesign:
+
+```powershell
+$env:ACTIVE_JOB_CONFIG_PATH = "C:\path\to\Active Job.json"
+$env:USE_OPEN_INDESIGN_DOCUMENT = "true"
+node .\Typo_Checker.js
+Remove-Item Env:ACTIVE_JOB_CONFIG_PATH, Env:USE_OPEN_INDESIGN_DOCUMENT
+```
+
+The generic public launcher uses `OPEN_INDESIGN_DOCUMENT=true`; it discovers the
+single open document without requiring the private production `Active Job.json`.
+All InDesign discovery and export operations share one global mutex and run
+serially. Existing translation manifests, source exports, and workbooks are never
+overwritten.
+
+If export succeeded but a later review stage failed, `REUSE_EXPORT_JOB_PATH` can
+rerun the review stages without invoking InDesign or exporting again.
+
+## Offline validation
+
+Run all self-tests without opening InDesign or contacting Codex:
+
+```powershell
+npm test
+```
+
+The self-tests validate the bundled checker, adjacent exporter, public launcher,
+subscription boundary, input contracts, release provenance, embedded PowerShell,
+safe cleanup boundary, and Excel read/write support. They do not contact GitHub,
+Codex, or InDesign.
+
+## Repository permissions
+
+This public repository is maintained by Matthew Luke Publishing. The public has
+read and download access but no write access to the canonical repository. Anyone
+may download or fork the project and modify their own copy under the MIT License.
+A pull request is only a proposal and changes nothing here unless the repository
+owner reviews and merges it.
+
+## Maintainer notes
+
+### GitHub publication contract
+
+The canonical public repository is
+`https://github.com/MatthewLukePublishing/editorial`. After an authorized
+maintained source or documentation change—including every new executable or
+script—passes the relevant offline tests and Publishing consolidation, validate
+and commit the exact candidate locally. Do not push, tag, create a release, or
+otherwise publish to GitHub as an automatic completion step. Any GitHub action
+requires explicit per-action user authorization; if authorized, verify the
+resulting revision and CI.
+
+Never publish ignored inputs, generated workbooks, job records, credentials,
+authentication state, or private production data. A failed validation or push
+must be reported; it must not be described as published.
+
+## Management contract
+
+- Primary entry point: `Run_Latest_Typo_Checker.ps1`
+- Bundled checker: `Typo_Checker.js`
+- Archive boundary: `None`
+
+The maintained source folder is
+`D:\Google Drive\Publishing\Code\Databases\Editorial\Typos`. After source, documentation,
+or project-organization changes, run the publishing-code consolidation process.
+
+## Authentication contract
+
+This program must not store secrets or authentication state locally. All current and future credentials, `.env` files, DPAPI blobs, tokens, private keys, cookies, browser profiles, session state, and provider account contexts belong only in `D:\Google Drive\Publishing\Code\Admin\Access`. Code in this program may reference protected loaders or authenticated sessions from that directory but must never duplicate or print secret values.
+
+Never commit an `.env` file, API key, token, job input, review output, or
+authentication artifact.
+
+## License
+
+[MIT](LICENSE)

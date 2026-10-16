@@ -1,4 +1,4 @@
-name: Offline self-tests
+name: Editorial offline tests
 
 on:
   push:
@@ -9,26 +9,28 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: editorial-ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
+  offline-tests:
     runs-on: windows-latest
     timeout-minutes: 15
-
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v7
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v7
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Check JavaScript syntax
-        run: npm run check
-
-      - name: Run offline self-tests
+          cache-dependency-path: |
+            Typos/package-lock.json
+            Translate/package-lock.json
+      - name: Install locked component dependencies
+        run: |
+          npm --prefix Typos ci --ignore-scripts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm --prefix Translate ci --ignore-scripts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test database and both consumers without Adobe or model calls
         run: npm test
