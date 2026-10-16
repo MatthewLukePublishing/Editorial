@@ -34,6 +34,6 @@ test("active GitHub references use Editorial and the root version owns releases"
     "Typos/README.md", "Translate/README.md", "Translate/package.json"]) {
     const source = fs.readFileSync(path.join(root, file), "utf8");
     assert.doesNotMatch(source, /github\.com\/MatthewLukePublishing\/(?:typo-checker|translation-pipeline)/i);
-    assert.match(source, /MatthewLukePublishing\/editorial/);
+    assert.match(source, /MatthewLukePublishing\/Editorial/);
   }
 });

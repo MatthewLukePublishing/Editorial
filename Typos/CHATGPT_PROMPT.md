@@ -8,7 +8,7 @@ Run the Matthew Luke Publishing Typo Checker on the one document currently open
 in Adobe InDesign 2026. Check the text as German.
 
 Use only the canonical public repository:
-https://github.com/MatthewLukePublishing/editorial
+https://github.com/MatthewLukePublishing/Editorial
 
 Do not use an existing local copy of the checker. Query the repository's latest
 stable GitHub release, resolve its release tag to the exact immutable commit SHA,

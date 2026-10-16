@@ -247,7 +247,7 @@ owner reviews and merges it.
 ### GitHub publication contract
 
 The canonical public repository is
-`https://github.com/MatthewLukePublishing/editorial`. After an authorized
+`https://github.com/MatthewLukePublishing/Editorial`. After an authorized
 maintained source or documentation change—including every new executable or
 script—passes the relevant offline tests and Publishing consolidation, validate
 and commit the exact candidate locally. Do not push, tag, create a release, or

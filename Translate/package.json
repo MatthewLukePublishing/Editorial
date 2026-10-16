@@ -13,13 +13,13 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/MatthewLukePublishing/editorial.git",
+    "url": "git+https://github.com/MatthewLukePublishing/Editorial.git",
     "directory": "Translate"
   },
   "bugs": {
-    "url": "https://github.com/MatthewLukePublishing/editorial/issues"
+    "url": "https://github.com/MatthewLukePublishing/Editorial/issues"
   },
-  "homepage": "https://github.com/MatthewLukePublishing/editorial/tree/main/Translate#readme",
+  "homepage": "https://github.com/MatthewLukePublishing/Editorial/tree/main/Translate#readme",
   "dependencies": {
     "adm-zip": "0.6.0",
     "exceljs": "4.4.0",

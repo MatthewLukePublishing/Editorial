@@ -9,7 +9,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$Repository = 'MatthewLukePublishing/editorial'
+$Repository = 'MatthewLukePublishing/Editorial'
 $GitHubApiBase = "https://api.github.com/repos/$Repository"
 $WorkspacePrefix = 'matthew-luke-typo-checker-'
 $RequiredFiles = @(

@@ -17,14 +17,14 @@ this consolidation does not rewrite accepted translation evidence.
 
 ## Public Repository
 
-The canonical repository is [Editorial](https://github.com/MatthewLukePublishing/editorial).
+The canonical repository is [Editorial](https://github.com/MatthewLukePublishing/Editorial).
 It replaces the separate typo-checker and translation-pipeline repositories.
 The public can read, download and fork it; only the owner has direct write
 access. A public fork or pull request cannot change the canonical database.
 
 ```powershell
-git clone https://github.com/MatthewLukePublishing/editorial.git
-Set-Location editorial
+git clone https://github.com/MatthewLukePublishing/Editorial.git
+Set-Location Editorial
 node '.\Book Standards\BookStandards.cjs' summary
 npm --prefix Typos ci --ignore-scripts
 npm --prefix Translate ci --ignore-scripts

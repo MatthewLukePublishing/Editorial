@@ -28,8 +28,8 @@ The offline test suite does not require Codex, credentials, network access, Micr
 Clone the repository and install the exact locked dependencies:
 
 ```powershell
-git clone https://github.com/MatthewLukePublishing/editorial.git
-Set-Location .\editorial\Translate
+git clone https://github.com/MatthewLukePublishing/Editorial.git
+Set-Location .\Editorial\Translate
 npm ci --ignore-scripts
 npm test
 ```
@@ -273,7 +273,7 @@ The `.gitignore` and public-distribution test reject credentials, personal works
 ## GitHub publication contract
 
 The canonical public repository is
-`https://github.com/MatthewLukePublishing/editorial`. After an
+`https://github.com/MatthewLukePublishing/Editorial`. After an
 authorized maintained source or documentation change—including every new
 executable or script—passes the relevant offline tests and Publishing
 consolidation, validate and commit the exact candidate locally. Do not push,
